@@ -1,4 +1,4 @@
-// Radio Music (unofficial) - playback engine (milestone 2).
+// Radio Music (unofficial) - playback engine (milestone 3).
 // Clean-room implementation from the documented behaviour of Music Thing
 // Modular's Radio Music mk2 (Tom Whitwell with Chris Johnson).
 //
@@ -26,6 +26,8 @@ class RadioEngine
 public:
     static constexpr int kNumVoices = 4;
 
+    enum SpeedMode { SpeedTape = 0, SpeedNotes = 1, Speed90s = 2 };
+
     RadioEngine();
     ~RadioEngine();
 
@@ -48,6 +50,13 @@ public:
         bool  paused      = false;   // tape-style stop (speed slews to zero) and start
         bool  radioStart  = true;    // true: every file keeps advancing; false: station restarts at START when tuned
         bool  startImmediate = false; // true: START moves take effect at once instead of at the next Reset
+
+        // Speed (affects the tuned station only; background stations always advance at 1x).
+        int   speedMode   = SpeedTape;   // SpeedTape, SpeedNotes or Speed90s (90s: plays at original speed for now)
+        float speedTape   = 100.0f;      // percent of original speed, -400..+400 (negative plays backwards)
+        float speedNotes  = 0.0f;        // semitones, -48..+24
+        bool  quantisePitch = true;      // notes mode: round to whole semitones
+        bool  grit        = false;       // false: cubic interpolation. true: zero-order hold, 8-bit, ~20 kHz
 
         // Radio clock source. Free-running by default; with hostSync the clock follows the DAW's sample position.
         bool    hostSync    = false;
@@ -80,8 +89,13 @@ private:
     static constexpr int kCacheFrames   = 1 << 16;   // loop windows up to this long are cached by the stream thread
     static constexpr int kRenderChunk   = 256;       // audio-thread processing granularity
     static constexpr double kMaxStep    = 16.0;      // max file-rate / session-rate ratio supported
+    static constexpr double kMaxSpeed   = 4.0;       // max playback speed (400%, +24 semitones)
     static constexpr double kFastFadeSeconds = 0.025;   // fade used for Reset, loop and window changes (never longer than the crossfade setting)
     static constexpr double kPauseSlewSeconds = 0.3;    // tape-style stop/start time
+    static constexpr double kNotesPauseSeconds = 0.005; // notes mode stops (and starts) almost at once
+    static constexpr double kSpeedSmoothSeconds = 0.02; // speed changes glide over about this long
+    static constexpr double kGritRate    = 20000.0;     // grit mode output rate
+    static constexpr double kGritFilterHz = 8000.0;     // grit mode post-DAC filter
     static constexpr double kSettleSeconds    = 0.04;   // a moved End (or immediate Start) must hold still this long before it is used
 
     struct Table                      // numeric station data the audio thread may read
@@ -99,11 +113,12 @@ private:
         int      endStep   = 0;
         int      loopMode  = LoopForward;
         uint32_t epoch     = 0;       // bumped on Reset or a restart on station change
+        int      dir       = 1;       // +1 plays along the path, -1 plays it backwards
 
         bool operator== (const Sig& o) const noexcept
         {
             return station == o.station && startStep == o.startStep && endStep == o.endStep
-                   && loopMode == o.loopMode && epoch == o.epoch;
+                   && loopMode == o.loopMode && epoch == o.epoch && dir == o.dir;
         }
         bool operator!= (const Sig& o) const noexcept { return ! (*this == o); }
     };
@@ -120,6 +135,7 @@ private:
         std::atomic<int>      reqMode   { LoopForward };
         std::atomic<int>      reqRev    { 0 };
         std::atomic<int64_t>  reqTau    { 0 };
+        std::atomic<int>      reqDir    { 1 };
         std::atomic<uint32_t> reqTable  { 0 };
         std::atomic<uint32_t> readyGen  { 0 };
         std::atomic<uint32_t> failedGen { 0 };
@@ -149,7 +165,7 @@ private:
         int64_t  tauStart = 0;
         double   step = 1.0, phase = 0.0;
         int64_t  consumed = 0;
-        float    s0 = 0.0f, s1 = 0.0f;
+        float    h[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // previous, current, next, next-but-one frames (for interpolation)
         float    level = 0.0f, levelTarget = 0.0f, levelInc = 0.0f;
         float    fadeInc = 0.0f;
     };
@@ -164,7 +180,8 @@ private:
     int  allocVoice() noexcept;
     void handleTargetChange (Sig desired, const Table& t, int64_t clock, float xfInc, float fastInc) noexcept;
     void tryAlign (int voiceIndex, const Table& t, int64_t clock) noexcept;
-    void renderVoice (Voice& v, float* out, int n, const Table& t, int64_t clock, const float* mul, double sumMul) noexcept;
+    void renderVoice (Voice& v, float* out, int n, const Table& t, int64_t clock,
+                      const float* eff, double sumEff, const float* gain, bool cubic) noexcept;
     bool popFrames (Voice& v, float* dst, int num) noexcept;
     double tauFor (int station, int64_t clock, double fileRate) const noexcept;
     void publishStatus (const Table& t, int64_t clock, int desiredStation) noexcept;
@@ -207,8 +224,14 @@ private:
     int    seenStart = 0, seenEnd = 0;
     int64_t startStable = 0, endStable = 0;
 
-    double speedMul = 1.0;        // 1 = playing, 0 = paused (tape-style slew)
-    std::array<float, kRenderChunk> mulBuf {};
+    double pauseMul = 1.0;        // 1 = playing, 0 = paused (slews)
+    double speedSm  = 1.0;        // smoothed speed multiplier (negative = backwards)
+    bool   speedInit = false;
+    int    curDir   = 1;
+    std::array<float, kRenderChunk> effPos {}, effNeg {}, gainPos {}, gainNeg {};
+
+    double gritHold = 0.0, gritAcc = 0.0, gritLP = 0.0;
+    float  gritValue = 0.0f;
 
     std::atomic<bool>     resetFlag { false };
     std::atomic<int64_t>  clockSamples { 0 };

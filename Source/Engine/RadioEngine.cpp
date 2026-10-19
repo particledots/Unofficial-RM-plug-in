@@ -33,7 +33,7 @@ RadioEngine::RadioEngine()
 {
     Library::registerSupportedFormats (streamFormats);
     streamTmp.assign ((size_t) kChunkFrames, 0.0f);
-    scratch.assign ((size_t) (kMaxStep * kRenderChunk) + 16, 0.0f);
+    scratch.assign ((size_t) (kMaxStep * kMaxSpeed * kRenderChunk) + 16, 0.0f);
 
     for (auto& v : voices)
     {
@@ -62,7 +62,12 @@ void RadioEngine::prepare (double sessionSampleRate)
     underruns.store (0);
     knownTableId = tables[(size_t) activeTable.load()].id;
     settingsInit = false;
-    speedMul = 1.0;
+    pauseMul = 1.0;
+    speedSm = 1.0;
+    speedInit = false;
+    curDir = 1;
+    gritAcc = gritLP = 0.0;
+    gritValue = 0.0f;
     resetFlag.store (false);
     invalidateAll();
 }
@@ -115,8 +120,7 @@ const RadioEngine::Table& RadioEngine::acquireTable() noexcept
 // Frames of path time for a station at a given radio-clock sample.
 double RadioEngine::tauFor (int station, int64_t clock, double fileRate) const noexcept
 {
-    const double elapsed = (double) clock - refClock[(size_t) station];
-    return elapsed > 0.0 ? elapsed * (fileRate / sessionRate) : 0.0;
+    return ((double) clock - refClock[(size_t) station]) * (fileRate / sessionRate);   // negative if played backwards past the start
 }
 
 void RadioEngine::setIdle (Voice& v) noexcept
@@ -165,6 +169,7 @@ void RadioEngine::requestVoice (Voice& v, const Sig& sig, const Table& t, int64_
     v.reqMode.store (v.cfg.mode, std::memory_order_relaxed);
     v.reqRev.store (v.cfg.rev ? 1 : 0, std::memory_order_relaxed);
     v.reqTau.store (v.tauStart, std::memory_order_relaxed);
+    v.reqDir.store (sig.dir, std::memory_order_relaxed);
     v.reqTable.store (t.id, std::memory_order_relaxed);
     v.reqGen.store (v.gen, std::memory_order_release);
 }
@@ -303,24 +308,28 @@ void RadioEngine::tryAlign (int voiceIndex, const Table& t, int64_t clock) noexc
 
     // The voice began where the station was when it was requested. Skip ahead by however much
     // the radio clock has moved since, so it joins in exactly where the station "is".
-    const int64_t tauNow = (int64_t) std::floor (tauFor (v.sig.station, clock, v.fileRate));
-    const int64_t skip = std::max<int64_t> (0, tauNow - v.tauStart);
+    // Join where the station really is, to a fraction of a frame (the voice began at a whole frame, tauStart).
+    const double tauNow = tauFor (v.sig.station, clock, v.fileRate);
+    const double skipReal = std::max (0.0, v.sig.dir > 0 ? tauNow - (double) v.tauStart : (double) v.tauStart - tauNow);
+    const int64_t skip = (int64_t) std::floor (skipReal);
 
-    if (skip + 2 > kFifoFrames - 2048)                   // too far behind to catch up from the buffer
+    if (skip + 4 > kFifoFrames - 2048)                   // too far behind to catch up from the buffer
     {
         requestVoice (v, v.sig, t, clock, v.fadeInc);
         return;
     }
 
-    if ((int64_t) v.fifo.getNumReady() < skip + 2)
+    if ((int64_t) v.fifo.getNumReady() < skip + 4)
         return;                                          // wait for the stream thread to read further
 
     popFrames (v, nullptr, (int) skip);
-    float two[2] {};
-    popFrames (v, two, 2);
-    v.s0 = two[0];
-    v.s1 = two[1];
-    v.phase = 0.0;
+    float three[3] {};
+    popFrames (v, three, 3);
+    v.h[0] = three[0];                                   // no earlier frame is known: repeat the first one
+    v.h[1] = three[0];
+    v.h[2] = three[1];
+    v.h[3] = three[2];
+    v.phase = skipReal - (double) skip;
     v.consumed = skip;
     v.state = Voice::State::Playing;
 
@@ -347,12 +356,12 @@ void RadioEngine::tryAlign (int voiceIndex, const Table& t, int64_t clock) noexc
 }
 
 void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int64_t clock,
-                               const float* mul, double sumMul) noexcept
+                               const float* eff, double sumEff, const float* gain, bool cubic) noexcept
 {
-    const double adv = v.phase + v.step * sumMul;
+    const double adv = v.phase + v.step * sumEff;
     const int k = (int) adv;
 
-    if ((int) scratch.size() < k + 2 || v.fifo.getNumReady() < k)
+    if ((int) scratch.size() < k + 4 || v.fifo.getNumReady() < k)
     {
         underruns.fetch_add (1);
 
@@ -368,9 +377,11 @@ void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int6
     }
 
     float* s = scratch.data();
-    s[0] = v.s0;
-    s[1] = v.s1;
-    popFrames (v, s + 2, k);
+    s[0] = v.h[0];
+    s[1] = v.h[1];
+    s[2] = v.h[2];
+    s[3] = v.h[3];
+    popFrames (v, s + 4, k);
 
     const bool fading = std::fabs (v.level - v.levelTarget) > 0.0f;
     float level = v.level;
@@ -382,9 +393,23 @@ void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int6
     for (int i = 0; i < n; ++i)
     {
         const int idx = (int) p;
-        const float frac = (float) (p - (double) idx);
-        const float sample = s[idx] + (s[idx + 1] - s[idx]) * frac;
-        p += v.step * (double) mul[i];
+        const float f = (float) (p - (double) idx);
+        float sample;
+
+        if (cubic)                                        // 4-point cubic (Catmull-Rom) between the current and the next frame
+        {
+            const float y0 = s[idx], y1 = s[idx + 1], y2 = s[idx + 2], y3 = s[idx + 3];
+            const float a = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
+            const float b = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+            const float c = -0.5f * y0 + 0.5f * y2;
+            sample = ((a * f + b) * f + c) * f + y1;
+        }
+        else                                              // zero-order hold
+        {
+            sample = s[idx + 1];
+        }
+
+        p += v.step * (double) eff[i];
 
         float g;
         if (fading)
@@ -399,13 +424,15 @@ void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int6
             g = (level >= 1.0f) ? 1.0f : 0.0f;
         }
 
-        out[i] += sample * g;
+        out[i] += sample * g * gain[i];
     }
 
     v.level = level;
     v.phase = adv - (double) k;
-    v.s0 = s[k];
-    v.s1 = s[k + 1];
+    v.h[0] = s[k];
+    v.h[1] = s[k + 1];
+    v.h[2] = s[k + 2];
+    v.h[3] = s[k + 3];
     v.consumed += k;
 
     if (v.level <= 0.0f && v.levelTarget <= 0.0f)
@@ -492,8 +519,36 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     const float xfInc   = (float) (1.0 / std::max (1.0, (double) p.crossfadeMs * 0.001 * sr));
     const float fastInc = (float) (1.0 / (kFastFadeSeconds * sr));
     const int64_t settle = (int64_t) (kSettleSeconds * sr);
-    const double mInc = 1.0 / (kPauseSlewSeconds * sr);
-    const double mTarget = p.paused ? 0.0 : 1.0;
+    const bool cubic = ! p.grit;
+
+    // Speed. Tape: percent of original speed (negative = backwards). Notes: semitones (whole semitones if quantised).
+    // 90s mode is not implemented yet and plays at original speed.
+    double speedTarget = 1.0;
+    if (p.speedMode == SpeedTape)
+    {
+        speedTarget = juce::jlimit (-kMaxSpeed, kMaxSpeed, (double) p.speedTape / 100.0);
+    }
+    else if (p.speedMode == SpeedNotes)
+    {
+        double st = juce::jlimit (-48.0, 24.0, (double) p.speedNotes);
+        if (p.quantisePitch)
+            st = std::round (st);
+        speedTarget = std::exp2 (st / 12.0);
+    }
+
+    if (! speedInit)
+    {
+        speedSm = speedTarget;
+        speedInit = true;
+    }
+
+    const double speedAlpha = 1.0 - std::exp (-1.0 / (kSpeedSmoothSeconds * sr));
+    const double pauseInc = 1.0 / ((p.speedMode == SpeedNotes ? kNotesPauseSeconds : kPauseSlewSeconds) * sr);
+    const double pauseTarget = p.paused ? 0.0 : 1.0;
+
+    // Grit mode: output rate and filter.
+    gritHold = sr / kGritRate;
+    const double gritCoef = 1.0 - std::exp (-2.0 * juce::MathConstants<double>::pi * kGritFilterHz / sr);
 
     int done = 0;
 
@@ -535,6 +590,10 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
             lastDesiredStation = desiredStation;
         }
 
+        // Playing backwards needs a voice that reads the path backwards: switch once the speed has crossed zero.
+        if (curDir > 0 && speedSm < -0.002)       curDir = -1;
+        else if (curDir < 0 && speedSm > 0.002)   curDir = 1;
+
         Sig desired;
         if (desiredStation >= 0)
         {
@@ -543,6 +602,7 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
             desired.endStep   = appliedEnd;
             desired.loopMode  = juce::jlimit (0, 2, p.loopMode);
             desired.epoch     = epochOf[(size_t) desiredStation];
+            desired.dir       = curDir;
         }
 
         handleTargetChange (desired, t, clock, xfInc, fastInc);
@@ -551,35 +611,63 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
             if (voices[(size_t) i].state == Voice::State::Loading)
                 tryAlign (i, t, clock);
 
-        // Pause: tape-style, the speed multiplier slews to zero and back.
-        double m = speedMul, sumMul = 0.0;
+        // Per-sample speed: smoothed speed knob times the pause ramp. A voice only plays in its own direction
+        // and fades to silence as the speed approaches zero (no steady DC when paused or stopped).
+        double sumPos = 0.0, sumNeg = 0.0, sumAll = 0.0;
         for (int i = 0; i < n; ++i)
         {
-            if (m < mTarget)      m = std::min (mTarget, m + mInc);
-            else if (m > mTarget) m = std::max (mTarget, m - mInc);
-            mulBuf[(size_t) i] = (float) m;
-            sumMul += (double) mulBuf[(size_t) i];
+            if (pauseMul < pauseTarget)      pauseMul = std::min (pauseTarget, pauseMul + pauseInc);
+            else if (pauseMul > pauseTarget) pauseMul = std::max (pauseTarget, pauseMul - pauseInc);
+
+            speedSm += (speedTarget - speedSm) * speedAlpha;
+
+            const double e = speedSm * pauseMul;
+            effPos[(size_t) i] = (float) std::max (0.0, e);
+            effNeg[(size_t) i] = (float) std::max (0.0, -e);
+            gainPos[(size_t) i] = std::min (1.0f, effPos[(size_t) i] * 20.0f);
+            gainNeg[(size_t) i] = std::min (1.0f, effNeg[(size_t) i] * 20.0f);
+            sumPos += (double) effPos[(size_t) i];
+            sumNeg += (double) effNeg[(size_t) i];
+            sumAll += e;
         }
-        speedMul = m;
 
         for (int i = 0; i < kNumVoices; ++i)
         {
             auto& v = voices[(size_t) i];
             if (v.state == Voice::State::Playing)
             {
-                if (v.step > kMaxStep || v.step <= 0.0)
+                if (v.step * kMaxSpeed > kMaxStep * kMaxSpeed || v.step <= 0.0)
                     setIdle (v);
+                else if (v.sig.dir > 0)
+                    renderVoice (v, out + done, n, t, clock, effPos.data(), sumPos, gainPos.data(), cubic);
                 else
-                    renderVoice (v, out + done, n, t, clock, mulBuf.data(), sumMul);
+                    renderVoice (v, out + done, n, t, clock, effNeg.data(), sumNeg, gainNeg.data(), cubic);
             }
         }
 
-        // Time spent paused is time the tuned station fell behind the radio clock.
-        if (committedSig.station >= 0 && sumMul < (double) n)
-            refClock[(size_t) committedSig.station] += (double) n - sumMul;
+        // The tuned station moves by (speed x time); the difference to real time is what it has fallen behind the radio clock
+        // (negative if it has moved ahead). Other stations are not affected.
+        if (committedSig.station >= 0)
+            refClock[(size_t) committedSig.station] += (double) n - sumAll;
 
         clock += n;
         done += n;
+    }
+
+    // Grit mode: 8-bit, about 20 kHz, then an emulated post-DAC filter.
+    if (p.grit)
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            gritAcc += 1.0;
+            if (gritAcc >= gritHold)
+            {
+                gritAcc -= gritHold;
+                gritValue = std::round (juce::jlimit (-1.0f, 1.0f, out[i]) * 127.0f) / 127.0f;
+            }
+            gritLP += ((double) gritValue - gritLP) * gritCoef;
+            out[i] = (float) gritLP;
+        }
     }
 
     clockSamples.store (clock, std::memory_order_relaxed);
@@ -674,6 +762,7 @@ bool RadioEngine::serviceVoice (Voice& v)
         const int      mode    = v.reqMode.load (std::memory_order_relaxed);
         const bool     rev     = v.reqRev.load (std::memory_order_relaxed) != 0;
         const int64_t  tau     = v.reqTau.load (std::memory_order_relaxed);
+        const int      dir     = v.reqDir.load (std::memory_order_relaxed);
         const uint32_t tableId = v.reqTable.load (std::memory_order_relaxed);
 
         if (v.reqGen.load (std::memory_order_acquire) != gen)
@@ -710,10 +799,11 @@ bool RadioEngine::serviceVoice (Voice& v)
                     c.mode = mode;
                     v.scfg = c;
 
+                    // dir < 0 reads the same path backwards: same position, opposite direction of travel.
                     const PathPoint pt = pathAt (c, tau);
                     v.spos   = pt.pos;
-                    v.sback  = pt.back;
-                    v.sended = pt.ended;
+                    v.sback  = dir > 0 ? pt.back : ! pt.back;
+                    v.sended = pt.ended || (dir < 0 && mode == LoopOff && tau <= 0);
 
                     // Short loop windows are held in a small cache so tight loops do not hammer the disk.
                     if (c.length() <= kCacheFrames)

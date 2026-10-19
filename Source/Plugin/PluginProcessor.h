@@ -97,6 +97,11 @@ private:
     std::atomic<float>* radioStartParam = nullptr;
     std::atomic<float>* immediateParam = nullptr;
     std::atomic<float>* hostSyncParam  = nullptr;
+    std::atomic<float>* speedModeParam = nullptr;
+    std::atomic<float>* speedTapeParam = nullptr;
+    std::atomic<float>* speedNotesParam = nullptr;
+    std::atomic<float>* quantiseParam  = nullptr;
+    std::atomic<float>* gritParam      = nullptr;
 
     bool prevReset = false;
     std::atomic<float> outputPeak { 0.0f };

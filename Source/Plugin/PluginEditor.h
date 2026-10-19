@@ -16,6 +16,9 @@ public:
     Knob (const juce::String& captionText, std::function<juce::String (double)> formatter);
     void paint (juce::Graphics&) override;
 
+    void setCaption (const juce::String& t) { caption = t; repaint(); }
+    void setFormatter (std::function<juce::String (double)> f) { format = std::move (f); repaint(); }
+
 private:
     juce::String caption;
     std::function<juce::String (double)> format;
@@ -93,19 +96,26 @@ private:
     void timerCallback() override;
     void chooseFolder();
     void addHint (juce::Component& c, const juce::String& text);
+    void addHint (juce::Component& c, std::function<juce::String()> text);
+    void applySpeedMode (int mode);
 
     RadioMusicProcessor& processor;
 
     rmui::DialDisplay dial;
-    rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob;
+    rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob, speedKnob;
     rmui::RmButton resetButton, pauseButton, hostSyncButton, radioStartButton, immediateButton, folderButton;
-    rmui::Segmented loopSelector;
+    rmui::RmButton quantiseButton, gritButton;
+    rmui::Segmented loopSelector, speedModeSelector;
 
     juce::AudioProcessorValueTreeState::SliderAttachment startAttach, endAttach, crossfadeAttach, volumeAttach;
-    juce::AudioProcessorValueTreeState::ButtonAttachment pauseAttach, hostSyncAttach, radioStartAttach, immediateAttach;
+    juce::AudioProcessorValueTreeState::ButtonAttachment pauseAttach, hostSyncAttach, radioStartAttach, immediateAttach,
+                                                         quantiseAttach, gritAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;   // follows the speed mode
+    juce::ParameterAttachment speedModeWatcher;
+    int speedMode = 0;
 
     std::unique_ptr<juce::FileChooser> chooser;
-    std::map<juce::Component*, juce::String> hints;
+    std::map<juce::Component*, std::function<juce::String()>> hints;
     juce::String currentHint;
     float meterLevel = 0.0f;
 

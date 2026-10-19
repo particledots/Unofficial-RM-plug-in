@@ -87,17 +87,24 @@ inline PathCfg makeCfg (int startStep, int endStep, int64_t numFrames, int mode)
     return c;
 }
 
-// Where the path is after tau frames. tau is clamped to >= 0.
+inline int64_t floorMod (int64_t a, int64_t m) noexcept
+{
+    const int64_t r = a % m;
+    return r < 0 ? r + m : r;
+}
+
+// Where the path is after tau frames. tau may be negative (the station was played backwards past its start):
+// looping paths simply wrap round, a path with loop mode Off stays at the start of the window.
 inline PathPoint pathAt (const PathCfg& c, int64_t tau) noexcept
 {
     const int64_t L = std::max<int64_t> (1, c.hi - c.lo);
-    if (tau < 0)
-        tau = 0;
 
     PathPoint p;
 
     if (c.mode == LoopOff)
     {
+        if (tau < 0)
+            tau = 0;
         if (tau >= L)
         {
             p.ended = true;
@@ -108,7 +115,7 @@ inline PathPoint pathAt (const PathCfg& c, int64_t tau) noexcept
     }
     else if (c.mode == LoopPingPong)
     {
-        const int64_t u = tau % (2 * L);
+        const int64_t u = floorMod (tau, 2 * L);
         const bool second = u >= L;
         const int64_t w = second ? u - L : u;
         p.back = (second != c.rev);
@@ -116,7 +123,7 @@ inline PathPoint pathAt (const PathCfg& c, int64_t tau) noexcept
     }
     else
     {
-        const int64_t w = tau % L;
+        const int64_t w = floorMod (tau, L);
         p.back = c.rev;
         p.pos  = c.rev ? c.hi - 1 - w : c.lo + w;
     }

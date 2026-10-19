@@ -97,6 +97,25 @@ juce::AudioProcessorValueTreeState::ParameterLayout RadioMusicProcessor::createL
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "startImmediate", 1 }, "Start immediate", false));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "hostSync", 1 }, "Host sync", false));
 
+    // Milestone 3. Speed affects the tuned station only. Tape: percent of original speed (negative plays backwards).
+    // Notes: semitones. The 90s mode is not implemented yet and plays at original speed.
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "speedMode", 1 }, "Speed mode",
+        StringArray { "Tape", "Notes", "'90s" }, 0));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "speedTape", 1 }, "Speed (tape)",
+        NormalisableRange<float> (-400.0f, 400.0f, 0.0f), 100.0f,
+        AudioParameterFloatAttributes().withLabel ("%")));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "speedNotes", 1 }, "Pitch (notes)",
+        NormalisableRange<float> (-48.0f, 24.0f, 0.0f), 0.0f,
+        AudioParameterFloatAttributes().withLabel ("st")));
+
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "quantisePitch", 1 }, "Quantise pitch", true));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "gritMode", 1 }, "Grit mode", false));
+
     return layout;
 }
 
@@ -116,6 +135,11 @@ RadioMusicProcessor::RadioMusicProcessor()
     radioStartParam = apvts.getRawParameterValue ("radioStart");
     immediateParam = apvts.getRawParameterValue ("startImmediate");
     hostSyncParam  = apvts.getRawParameterValue ("hostSync");
+    speedModeParam = apvts.getRawParameterValue ("speedMode");
+    speedTapeParam = apvts.getRawParameterValue ("speedTape");
+    speedNotesParam = apvts.getRawParameterValue ("speedNotes");
+    quantiseParam  = apvts.getRawParameterValue ("quantisePitch");
+    gritParam      = apvts.getRawParameterValue ("gritMode");
 }
 
 RadioMusicProcessor::~RadioMusicProcessor() = default;
@@ -151,6 +175,11 @@ void RadioMusicProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     p.paused      = pauseParam->load() > 0.5f;
     p.radioStart  = radioStartParam->load() > 0.5f;
     p.startImmediate = immediateParam->load() > 0.5f;
+    p.speedMode   = juce::jlimit (0, 2, (int) std::lround (speedModeParam->load()));
+    p.speedTape   = speedTapeParam->load();
+    p.speedNotes  = speedNotesParam->load();
+    p.quantisePitch = quantiseParam->load() > 0.5f;
+    p.grit        = gritParam->load() > 0.5f;
 
     // Reset: a rising edge on the Reset parameter (host automation) restarts the tuned station.
     const bool resetNow = resetParam->load() > 0.5f;

@@ -6,6 +6,8 @@
 //   * the left channel of a stereo file is used,
 //   * crossfades are smooth and about the requested length,
 //   * a very long file is streamed, not loaded into RAM,
+//   * (milestone 3) tape and notes speed (forwards and backwards), cubic interpolation, grit mode,
+//     pause fading to silence, background stations staying at 1x,
 //   * (milestone 2) loop window, reverse, ping-pong, loop off, Reset, Start latching, radio start off,
 //     Pause, and host sync all follow the documented behaviour.
 #include "Engine/RadioEngine.h"
@@ -645,6 +647,11 @@ static void testStressM2 (const juce::File& ramps, const juce::File& dc)
         if (blockCount % 19 == 0) p.startImmediate = rnd.nextBool();
         if (blockCount % 23 == 0) p.radioStart = rnd.nextBool();
         if (blockCount % 29 == 0) p.hostSync = rnd.nextBool();
+        if (blockCount % 31 == 0) p.speedMode = rnd.nextInt (3);
+        if (blockCount % 9 == 0)  p.speedTape = -400.0f + rnd.nextFloat() * 800.0f;
+        if (blockCount % 10 == 0) p.speedNotes = -48.0f + rnd.nextFloat() * 72.0f;
+        if (blockCount % 43 == 0) p.quantisePitch = rnd.nextBool();
+        if (blockCount % 47 == 0) p.grit = rnd.nextBool();
         p.hostPlaying = (blockCount % 37) != 0;
         p.crossfadeMs = (blockCount % 50 == 0) ? 500.0f : 1.0f + rnd.nextFloat() * 40.0f;
         if (blockCount % 41 == 0) host = (int64_t) (rnd.nextFloat() * 20.0f * sr); else host += 64;
@@ -654,6 +661,244 @@ static void testStressM2 (const juce::File& ramps, const juce::File& dc)
     });
     CHECK (! bad, "output stays finite and bounded while every parameter is automated");
     std::cout << "    underruns during the stress run: " << engine.getUnderrunCount() << " (informational)\n";
+}
+
+//==============================================================================
+// Milestone 3 tests
+
+static void writeSine (const juce::File& file, double rate, double seconds, double freq, float amp)
+{
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::OutputStream> out (file.createOutputStream());
+    auto w = wav.createWriterFor (out, juce::AudioFormatWriterOptions().withSampleRate (rate)
+                                                                         .withNumChannels (1)
+                                                                         .withBitsPerSample (24));
+    const int64_t len = (int64_t) (seconds * rate);
+    juce::AudioBuffer<float> buf (1, 4096);
+    for (int64_t pos = 0; pos < len; pos += 4096)
+    {
+        const int n = (int) std::min<int64_t> (4096, len - pos);
+        for (int i = 0; i < n; ++i)
+            buf.setSample (0, i, amp * (float) std::sin (2.0 * 3.14159265358979 * freq * (double) (pos + i) / rate));
+        w->writeFromAudioSampleBuffer (buf, 0, n);
+    }
+}
+
+// Median of the ramp's slope, in file frames per output sample, over many blocks (blocks that contain a wrap are ignored).
+static double medianSlope (Runner& r, RadioEngine::Params& p, double N, double seconds, double skipSeconds)
+{
+    std::vector<double> slopes;
+    int64_t first = -1;
+    r.run (seconds, p, [&] (int64_t clock, const float* o, int n)
+    {
+        if (first < 0) first = clock;
+        if ((double) (clock - first) < skipSeconds * r.sr) return;
+        const double slope = ((double) o[n - 1] - (double) o[0]) / (double) (n - 1) / 0.9 * N;
+        if (std::fabs (slope) < 10.0) slopes.push_back (slope);
+    });
+    if (slopes.empty()) return 1.0e9;
+    std::sort (slopes.begin(), slopes.end());
+    return slopes[slopes.size() / 2];
+}
+
+static void testSpeeds (const juce::File& dir)
+{
+    std::cout << "\n=== Speed: tape and notes ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dir);
+    const double N = (double) lib->stations[0].info.numFrames;
+
+    struct Case { const char* name; int mode; float tape; float notes; bool quant; double expected; };
+    const Case cases[] = {
+        { "tape +200%",                  RadioEngine::SpeedTape,  200.0f,  0.0f, true,  2.0 },
+        { "tape +50%",                   RadioEngine::SpeedTape,   50.0f,  0.0f, true,  0.5 },
+        { "tape +400%",                  RadioEngine::SpeedTape,  400.0f,  0.0f, true,  4.0 },
+        { "tape -100% (backwards)",      RadioEngine::SpeedTape, -100.0f,  0.0f, true, -1.0 },
+        { "tape -250% (backwards)",      RadioEngine::SpeedTape, -250.0f,  0.0f, true, -2.5 },
+        { "notes +12 semitones",         RadioEngine::SpeedNotes, 100.0f, 12.0f, true,  2.0 },
+        { "notes -12 semitones",         RadioEngine::SpeedNotes, 100.0f, -12.0f, true, 0.5 },
+        { "notes +7 semitones",          RadioEngine::SpeedNotes, 100.0f,  7.0f, true,  std::exp2 (7.0 / 12.0) },
+        { "notes +5.4, quantised: 5",    RadioEngine::SpeedNotes, 100.0f,  5.4f, true,  std::exp2 (5.0 / 12.0) },
+        { "notes +5.4, not quantised",   RadioEngine::SpeedNotes, 100.0f,  5.4f, false, std::exp2 (5.4 / 12.0) },
+        { "90s mode (not yet separate): original speed", RadioEngine::Speed90s, 300.0f, 7.0f, true, 1.0 },
+    };
+
+    for (auto& c : cases)
+    {
+        RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+        Runner r { engine, sr };
+        RadioEngine::Params p; p.station = 0.5f; p.speedMode = c.mode; p.speedTape = c.tape; p.speedNotes = c.notes; p.quantisePitch = c.quant;
+        const double slope = medianSlope (r, p, N, 1.2, 0.4);
+        std::cout << "    " << c.name << ": measured " << slope << " frames per sample, expected " << c.expected << "\n";
+        CHECK (std::fabs (slope - c.expected) < 0.01 * std::max (1.0, std::fabs (c.expected)), std::string (c.name) + " plays at the right speed");
+        CHECK (engine.getUnderrunCount() == 0, std::string (c.name) + ": no underruns");
+    }
+}
+
+static void testReversal (const juce::File& dir)
+{
+    std::cout << "\n=== Speed passing through zero into reverse ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dir);
+    const double N = (double) lib->stations[0].info.numFrames;
+    RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+    Runner r { engine, sr };
+    RadioEngine::Params p; p.station = 0.5f;
+
+    r.run (1.0, p);
+    float v1 = 0.0f;
+    r.run (0.1, p, [&] (int64_t, const float* o, int n) { v1 = o[n - 1]; });
+    const double pos1 = (double) v1 / 0.9 * N;
+
+    p.speedTape = -100.0f;
+    r.run (0.6, p);
+    float v2 = 0.0f; bool bad = false;
+    r.run (0.2, p, [&] (int64_t, const float* o, int n) { v2 = o[n - 1]; for (int i = 0; i < n; ++i) if (! std::isfinite (o[i]) || std::fabs (o[i]) > 1.5f) bad = true; });
+    const double pos2 = (double) v2 / 0.9 * N;
+    const double movedSeconds = (pos2 - pos1) / sr;
+    std::cout << "    moved " << movedSeconds << " s in 0.8 s after reversing (expected about -0.8 + a small forward glide)\n";
+    CHECK (movedSeconds < -0.55 && movedSeconds > -0.95, "after reversing, the station runs backwards from where it was (no jump)");
+    CHECK (! bad, "output stays finite and bounded through the reversal");
+    CHECK (std::fabs (medianSlope (r, p, N, 0.5, 0.0) + 1.0) < 0.01, "reverse plays at -1x");
+
+    p.speedTape = 100.0f;
+    r.run (0.5, p);
+    CHECK (std::fabs (medianSlope (r, p, N, 0.5, 0.0) - 1.0) < 0.01, "and forwards again at +1x");
+    CHECK (engine.getUnderrunCount() == 0, "no underruns");
+}
+
+static void testReverseInWindow (const juce::File& dir)
+{
+    std::cout << "\n=== Reverse speed inside a loop window ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dir);
+    const auto info = lib->stations[0].info;
+    const double N = (double) info.numFrames;
+
+    for (int mode : { LoopForward, LoopPingPong })
+    {
+        RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+        Runner r { engine, sr };
+        RadioEngine::Params p; p.station = 0.5f; p.startNorm = 0.25f; p.endNorm = 0.30f; p.loopMode = mode; p.speedTape = -100.0f;
+        const auto cfg = cfgFromParams (p, info);
+        double lo = 1.0e9, hi = -1.0e9; int blocks = 0;
+        r.run (2.5, p, [&] (int64_t, const float* o, int n)
+        {
+            if (++blocks < 40) return;
+            for (int i = 0; i < n; ++i) { const double pos = (double) o[i] / 0.9 * N; lo = std::min (lo, pos); hi = std::max (hi, pos); }
+        });
+        std::cout << "    window " << cfg.lo << ".." << cfg.hi << ", played " << lo << ".." << hi << "\n";
+        CHECK (lo > (double) cfg.lo - 64.0 && hi < (double) cfg.hi + 64.0, (mode == LoopForward ? "backwards loop stays inside the window" : "backwards ping-pong stays inside the window"));
+        CHECK (hi - lo > 0.9 * (double) cfg.length(), "and covers the whole window (it wraps / bounces)");
+    }
+}
+
+static void testBackgroundStaysAtOneX (const juce::File& dir)
+{
+    std::cout << "\n=== Background stations stay at 1x while the tuned one is sped up ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dir);
+    const double N = (double) lib->stations[0].info.numFrames;
+    RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+    Runner r { engine, sr };
+    RadioEngine::Params p; p.station = 0.25f; p.speedTape = 200.0f; p.crossfadeMs = 5.0f;
+
+    float vLeave = 0.0f; int64_t cLeave = 0;
+    r.run (1.5, p, [&] (int64_t clock, const float* o, int n) { vLeave = o[n - 1]; cLeave = clock + n - 1; });
+    const double posLeave = (double) vLeave / 0.9 * N;
+
+    p.station = 0.75f;
+    r.run (1.0, p);
+
+    p.station = 0.25f; p.speedTape = 100.0f;
+    float vBack = 0.0f; int64_t cBack = 0;
+    r.run (0.6, p, [&] (int64_t clock, const float* o, int n) { vBack = o[n - 1]; cBack = clock + n - 1; });
+    const double posBack = (double) vBack / 0.9 * N;
+    const double expected = posLeave + (double) (cBack - cLeave);
+    std::cout << "    left at " << posLeave / sr << " s, back at " << posBack / sr << " s, expected about " << expected / sr << " s\n";
+    CHECK (std::fabs (posBack - expected) < 0.05 * sr, "station 0 kept advancing at 1x while it was not tuned");
+}
+
+static void testCubicAndGrit (const juce::File& dir)
+{
+    std::cout << "\n=== Cubic interpolation and grit mode ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dir);
+    const auto info = lib->stations[0].info;                 // 1 kHz sine, 44.1 kHz file, 0.5 amplitude
+
+    auto rmsError = [&] (bool grit, double& rmsSignal)
+    {
+        RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+        Runner r { engine, sr };
+        RadioEngine::Params p; p.station = 0.5f; p.grit = grit;
+        double se = 0.0, ss = 0.0; int count = 0; int64_t first = -1;
+        r.run (1.0, p, [&] (int64_t clock, const float* o, int n)
+        {
+            if (first < 0) first = clock;
+            if ((double) (clock - first) < 0.4 * sr) return;
+            for (int i = 0; i < n; ++i)
+            {
+                const double pos = (double) (clock + i) * (info.sampleRate / sr);
+                const double e = 0.5 * std::sin (2.0 * 3.14159265358979 * 1000.0 * pos / info.sampleRate);
+                se += ((double) o[i] - e) * ((double) o[i] - e);
+                ss += (double) o[i] * (double) o[i];
+                ++count;
+            }
+        });
+        rmsSignal = std::sqrt (ss / count);
+        return std::sqrt (se / count);
+    };
+
+    double sigCubic = 0.0, sigGrit = 0.0;
+    const double errCubic = rmsError (false, sigCubic);
+    const double errGrit  = rmsError (true, sigGrit);
+    std::cout << "    cubic: error RMS " << errCubic << ", signal RMS " << sigCubic << "; grit: error RMS " << errGrit << ", signal RMS " << sigGrit << "\n";
+    CHECK (errCubic < 0.0005, "cubic interpolation follows a 1 kHz sine (44.1 kHz file in a 48 kHz session) within -60 dB");
+    CHECK (errGrit > 4.0 * errCubic, "grit mode is audibly different from cubic (more error: hold, 8-bit, filter)");
+    CHECK (sigGrit > 0.25 && sigGrit < 0.40, "grit mode keeps the level (signal RMS about 0.35)");
+}
+
+static void testPauseSilence (const juce::File& dir)
+{
+    std::cout << "\n=== Pause fades to silence (no steady DC) ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dir);                             // DC 0.5 and DC 0.25
+    for (int mode : { RadioEngine::SpeedTape, RadioEngine::SpeedNotes })
+    {
+        RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+        Runner r { engine, sr };
+        RadioEngine::Params p; p.station = 0.25f; p.speedMode = mode;
+        r.run (0.5, p);
+        float level = 0.0f;
+        r.run (0.1, p, [&] (int64_t, const float* o, int n) { level = o[n - 1]; });
+        CHECK (std::fabs (level - 0.5f) < 0.01f, "playing: DC file reads 0.5");
+
+        p.paused = true;
+        r.run (mode == RadioEngine::SpeedTape ? 0.6 : 0.1, p);
+        float peak = 0.0f;
+        r.run (0.3, p, [&] (int64_t, const float* o, int n) { for (int i = 0; i < n; ++i) peak = std::max (peak, std::fabs (o[i])); });
+        std::cout << "    paused level " << peak << "\n";
+        CHECK (peak < 1.0e-3f, (mode == RadioEngine::SpeedTape ? "tape pause: silent once stopped (no DC)" : "notes pause: silent almost at once (no DC)"));
+
+        p.paused = false;
+        r.run (0.7, p, [&] (int64_t, const float* o, int n) { level = o[n - 1]; });
+        CHECK (std::fabs (level - 0.5f) < 0.01f, "released: sound returns");
+    }
+}
+
+static void testGritDC (const juce::File& dir)
+{
+    std::cout << "\n=== Grit mode keeps a steady level ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dir);
+    RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+    Runner r { engine, sr };
+    RadioEngine::Params p; p.station = 0.25f; p.grit = true;
+    r.run (0.5, p);
+    float lo = 10.0f, hi = -10.0f;
+    r.run (0.3, p, [&] (int64_t, const float* o, int n) { for (int i = 0; i < n; ++i) { lo = std::min (lo, o[i]); hi = std::max (hi, o[i]); } });
+    std::cout << "    DC 0.5 through grit: " << lo << " .. " << hi << "\n";
+    CHECK (lo > 0.49f && hi < 0.51f, "DC 0.5 comes out within 8-bit accuracy");
 }
 
 int main()
@@ -685,6 +930,9 @@ int main()
     writeRamp (two.getChildFile ("a.wav"), 48000.0, 10.0, 24, 1);
     writeRamp (two.getChildFile ("b.wav"), 48000.0, 10.0, 24, 1);
 
+    auto sine = root.getChildFile ("sine"); sine.createDirectory();
+    writeSine (sine.getChildFile ("sine.wav"), 44100.0, 10.0, 1000.0, 0.5f);
+
     testPathMath();
     testAtRate (48000.0, ramps);
     testAtRate (44100.0, ramps);
@@ -698,6 +946,13 @@ int main()
     testRadioStartOff (two);
     testPause (win);
     testHostSync (win);
+    testSpeeds (win);
+    testReversal (win);
+    testReverseInWindow (win);
+    testBackgroundStaysAtOneX (two);
+    testCubicAndGrit (sine);
+    testPauseSilence (dc);
+    testGritDC (dc);
     testStressM2 (ramps, dc);
     testLongFile (big);
 

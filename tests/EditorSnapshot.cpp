@@ -92,6 +92,7 @@ int main (int argc, char** argv)
     setParam (proc, "crossfade", 1500.0f);
     setParam (proc, "volume", -6.0f);
     setParam (proc, "pause", 0.0f);
+    setParam (proc, "speedTape", 150.0f);
     pump (proc, 2.5);
     snap (proc, outDir.getChildFile ("2_playing.png"));
 
@@ -104,8 +105,17 @@ int main (int argc, char** argv)
     setParam (proc, "hostSync", 1.0f);
     setParam (proc, "radioStart", 0.0f);
     setParam (proc, "crossfade", 25.0f);
+    setParam (proc, "speedMode", 1.0f);
+    setParam (proc, "speedNotes", 7.0f);
+    setParam (proc, "gritMode", 1.0f);
     pump (proc, 1.5);
-    snap (proc, outDir.getChildFile ("3_reverse_pingpong.png"));
+    snap (proc, outDir.getChildFile ("3_reverse_pingpong_notes.png"));
+
+    // 4. 90s mode (not available yet: speed knob dimmed)
+    setParam (proc, "speedMode", 2.0f);
+    setParam (proc, "pause", 0.0f);
+    pump (proc, 0.3);
+    snap (proc, outDir.getChildFile ("4_90s.png"));
 
     root.deleteRecursively();
     return 0;
