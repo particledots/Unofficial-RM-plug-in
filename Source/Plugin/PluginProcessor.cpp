@@ -243,7 +243,19 @@ juce::AudioProcessorEditor* RadioMusicProcessor::createEditor()
 void RadioMusicProcessor::setSampleFolder (const juce::File& folder)
 {
     apvts.state.setProperty ("sampleFolder", folder.getFullPathName(), nullptr);
+    keepBankOnReady.store (false);
     applyOnReady.store (true);        // the user chose this folder: use its settings.txt (and its first bank) once it is read
+    scanner.requestScan (folder);
+}
+
+void RadioMusicProcessor::rescanFolder()
+{
+    const auto folder = getSampleFolder();
+    if (folder == juce::File())
+        return;
+
+    keepBankOnReady.store (true);
+    applyOnReady.store (true);
     scanner.requestScan (folder);
 }
 
@@ -321,7 +333,9 @@ void RadioMusicProcessor::timerCallback()
 
         if (lib != nullptr && applyOnReady.exchange (false))
         {
-            bank = lib->lowestBankNumber();
+            const bool keep = keepBankOnReady.exchange (false) && lib->findBank (bank) != nullptr;
+            if (! keep)
+                bank = lib->lowestBankNumber();
             setParameterValue ("bank", (float) bank);
             lastBank = bank;
             applyBankSettings (*lib, bank);

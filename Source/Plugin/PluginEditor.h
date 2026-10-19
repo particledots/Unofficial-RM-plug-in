@@ -129,7 +129,7 @@ private:
     rmui::DialDisplay dial;
     rmui::BankStepper bankStepper;
     rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob, speedKnob;
-    rmui::RmButton resetButton, pauseButton, hostSyncButton, radioStartButton, immediateButton, folderButton;
+    rmui::RmButton resetButton, pauseButton, hostSyncButton, radioStartButton, immediateButton, folderButton, rescanButton;
     rmui::RmButton quantiseButton, gritButton;
     rmui::Segmented loopSelector, speedModeSelector;
 

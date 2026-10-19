@@ -109,7 +109,8 @@ struct Scanner
         if (separateSettings)
         {
             const auto sf = dir.getChildFile ("settings.txt");
-            if (sf.existsAsFile())
+            bank.ownSettingsFound = sf.existsAsFile();
+            if (bank.ownSettingsFound)
                 bank.settings = mergeSettings (bank.settings, parseSettings (sf.loadFileAsString()));
         }
 
@@ -169,7 +170,8 @@ std::shared_ptr<Library> Library::scan (const juce::File& folder,
         return lib;
 
     const auto rootSettingsFile = folder.getChildFile ("settings.txt");
-    if (rootSettingsFile.existsAsFile())
+    lib->rootSettingsFound = rootSettingsFile.existsAsFile();
+    if (lib->rootSettingsFound)
         lib->rootSettings = parseSettings (rootSettingsFile.loadFileAsString());
 
     // Documented: root folders whose names start with a number from 0 to 15 are banks. If any exist, root files are ignored.

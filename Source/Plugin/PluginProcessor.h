@@ -65,6 +65,7 @@ public:
 
     // Folder handling (message thread)
     void setSampleFolder (const juce::File& folder);
+    void rescanFolder();        // read the folder again (new files, subfolders, settings.txt) and apply settings.txt, keeping the bank
     juce::File getSampleFolder() const;
     std::shared_ptr<const rm::Library> getLibrary() const;
 
@@ -115,6 +116,7 @@ private:
     std::atomic<int>  startDividerSetting { rm::kStartDivider };   // startCVDivider from settings.txt
     std::atomic<bool> reselectSetting { false };                    // reselectSubdirOnStationChange from settings.txt
     std::atomic<bool> libraryChanged { false };                     // a new library arrived (scanner thread -> message thread)
+    std::atomic<bool> keepBankOnReady { false };                    // a rescan: stay on the current bank if it still exists
     std::atomic<bool> applyOnReady { false };                       // the user chose a folder: apply its settings.txt when it is ready
     int lastBank = 0;                                               // message thread only
 

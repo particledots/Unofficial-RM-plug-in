@@ -46,6 +46,7 @@ struct Bank
     int         firstSlot = 0;     // index into Library::slots
     int         numSlots  = 0;
     Settings    settings;          // top-level settings.txt overlaid with this bank's own settings.txt
+    bool        ownSettingsFound = false;   // this bank folder has its own settings.txt
 };
 
 // An immutable snapshot of the chosen folder. Created by scan(), never modified afterwards.
@@ -59,6 +60,7 @@ struct Library
     std::vector<Bank>          banks;          // banks that exist, in number order
     Settings                   rootSettings;
     bool                       hasNumberedBanks = false;
+    bool                       rootSettingsFound = false;   // a settings.txt was found in the top-level folder
     juce::StringArray          skippedFiles;   // files that looked like audio but could not be read
 
     const Bank* findBank (int number) const noexcept

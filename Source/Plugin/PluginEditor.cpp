@@ -586,6 +586,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
       radioStartButton ("RADIO START", rmui::RmButton::Style::Pill),
       immediateButton ("START NOW", rmui::RmButton::Style::Pill),
       folderButton ("CHOOSE FOLDER", rmui::RmButton::Style::Flat),
+      rescanButton ("RESCAN", rmui::RmButton::Style::Flat),
       quantiseButton ("QUANTISE", rmui::RmButton::Style::Pill),
       gritButton ("GRIT", rmui::RmButton::Style::Pill),
       loopSelector (*p.apvts.getParameter ("loopMode"), juce::StringArray { "OFF", "LOOP", "PING-PONG" }),
@@ -606,7 +607,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &dial, &startKnob, &endKnob, &crossfadeKnob, &volumeKnob, &resetButton, &pauseButton,
-             &hostSyncButton, &radioStartButton, &immediateButton, &folderButton, &loopSelector,
+             &hostSyncButton, &radioStartButton, &immediateButton, &folderButton, &rescanButton, &loopSelector,
              &speedKnob, &speedModeSelector, &quantiseButton, &gritButton, &bankStepper })
         addAndMakeVisible (c);
 
@@ -620,6 +621,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     quantiseButton.onStateChange = [this] { updateSnap(); };
     resetButton.onClick  = [this] { processor.triggerReset(); resetButton.flash(); };
     folderButton.onClick = [this] { chooseFolder(); };
+    rescanButton.onClick = [this] { processor.rescanFolder(); };
 
     addHint (dial,             "Drag along the dial (or use the mouse wheel) to tune. Each audio file in the folder is a station, in file-name order.");
     addHint (startKnob,        "Where playback starts, and the left edge of the loop. Takes effect on RESET unless START NOW is on. If START is right of END, the loop plays in reverse.");
@@ -642,6 +644,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     addHint (immediateButton,  "ON: moving START takes effect straight away instead of waiting for RESET.");
     addHint (hostSyncButton,   "ON: the radio clock follows the DAW's play position, so bounces repeat exactly. Silent while the transport is stopped.");
     addHint (folderButton,     "Choose the folder to play. Audio files (WAV, AIFF, RAW) in it are the stations. Folders named 0 to 15 (like \"05 shortwave\") are banks; subfolders pick one file at a time.");
+    addHint (rescanButton,     "Read the folder again: picks up new files, subfolders and a new or changed settings.txt (which is applied to the knobs). Stays on the current bank.");
     addHint (bankStepper,      "Bank 0 to 15: root folders whose names start with a number. Click the left or right side, or use the mouse wheel. Without numbered folders, the whole folder is bank 0.");
 
     addMouseListener (this, true);
@@ -752,6 +755,7 @@ void RadioMusicPanel::resized()
     gritButton.setBounds       (Rectangle<int> (rx, 434, rw, 24));
 
     folderButton.setBounds (Rectangle<int> (24, 514, 120, 26));
+    rescanButton.setBounds (Rectangle<int> (150, 514, 70, 26));
 }
 
 void RadioMusicPanel::paint (juce::Graphics& g)
@@ -837,7 +841,33 @@ void RadioMusicPanel::paint (juce::Graphics& g)
         const auto font = rmui::uiFont (11.0f);
         g.setColour (dim);
         g.setFont (font);
-        g.drawText (rmui::fitTail (text, font, 340.0f), juce::Rectangle<int> (152, 514, 350, 26), juce::Justification::centredLeft, false);
+        g.drawText (rmui::fitTail (text, font, 270.0f), juce::Rectangle<int> (230, 510, 280, 18), juce::Justification::centredLeft, false);
+
+        // what the plug-in found in the folder
+        juce::String info;
+        const auto lib = processor.getLibrary();
+        if (lib != nullptr && folder != juce::File())
+        {
+            const int bankNumber = juce::jlimit (0, rm::kNumBanks - 1, (int) std::lround (processor.apvts.getRawParameterValue ("bank")->load()));
+            if (const auto* b = lib->findBank (bankNumber))
+            {
+                int files = 0;
+                for (int i = b->firstSlot; i < b->firstSlot + b->numSlots; ++i)
+                    files += lib->slots[(size_t) i].numFiles;
+
+                info = "Bank " + juce::String (bankNumber) + ": " + juce::String (b->numSlots) + " stations, " + juce::String (files) + " files.  ";
+                if (lib->rootSettingsFound || b->ownSettingsFound)
+                    info += "settings.txt read: " + juce::String ((int) b->settings.size()) + " keys.";
+                else
+                    info += "No settings.txt found.";
+            }
+            else
+                info = "No bank " + juce::String (bankNumber) + " in this folder.  " + juce::String ((int) lib->banks.size()) + " banks found.";
+        }
+
+        g.setFont (rmui::uiFont (10.0f));
+        g.setColour (rmui::colours::dim.withAlpha (0.8f));
+        g.drawFittedText (info, juce::Rectangle<int> (230, 528, 280, 26), juce::Justification::topLeft, 2);
     }
 
     // credits
