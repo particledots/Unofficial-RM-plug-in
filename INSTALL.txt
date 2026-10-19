@@ -1,0 +1,58 @@
+RADIO MUSIC (UNOFFICIAL) - INSTALL GUIDE (macOS)
+================================================
+
+An unofficial plug-in inspired by Radio Music mk2 by Music Thing Modular
+(designed by Tom Whitwell with Chris Johnson of Plus Minus Audio).
+Not affiliated with or endorsed by Music Thing Modular.
+
+This download contains:
+  Radio Music Unofficial.component   (Audio Unit - use this one in Logic Pro)
+  Radio Music Unofficial.vst3        (VST3 - for other hosts)
+  LICENSE                            (GNU AGPL v3)
+
+The plug-ins are universal (Apple silicon + Intel), for macOS 12 or newer.
+They are signed ad hoc (not by Apple), so macOS flags them as "downloaded from
+the internet". Step 3 removes that flag.
+
+STEP 1 - Unzip
+  Double-click RadioMusicUnofficial-macOS.zip in your Downloads folder.
+  A folder called RadioMusicUnofficial appears.
+
+STEP 2 - Copy the plug-ins into place
+  1. In Finder, click the "Go" menu at the top of the screen, then "Go to Folder...".
+  2. Type   ~/Library/Audio/Plug-Ins/Components   and press Return.
+     (If the folder does not exist, make it: File > New Folder, name it Components.)
+  3. Drag "Radio Music Unofficial.component" from the RadioMusicUnofficial folder into it.
+  4. Optional, for VST3 hosts: Go > Go to Folder... > ~/Library/Audio/Plug-Ins/VST3
+     and drag "Radio Music Unofficial.vst3" into it.
+
+STEP 3 - Remove the quarantine flag (Terminal)
+  1. Open Terminal: press Command+Space, type Terminal, press Return.
+  2. Paste this whole line and press Return (it prints nothing when it works):
+
+     xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/"Radio Music Unofficial.component"
+
+  3. If you also installed the VST3, paste this and press Return:
+
+     xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/"Radio Music Unofficial.vst3"
+
+STEP 4 - Check it passes Apple's Audio Unit validation (optional but recommended)
+  In Terminal, paste and press Return:
+
+     auval -v aumu Rmux Pdts
+
+  Near the end you should see:  AU VALIDATION SUCCEEDED.
+  If you see anything else, copy the whole Terminal output and send it back.
+
+STEP 5 - Use it in Logic Pro
+  1. Open Logic Pro and create a Software Instrument track.
+  2. Click the instrument slot on the channel strip (it says "Inst 1" or is empty).
+  3. Choose  AU Instruments > particledots > Radio Music Unofficial > Stereo.
+  4. If it is not in the list: Logic Pro menu > Settings... > Plug-in Manager...,
+     find "Radio Music Unofficial", tick it, then use "Reset & Rescan Selection".
+     (Menu wording may differ slightly between Logic versions.)
+  5. In the plug-in window click "Choose folder..." and pick a folder containing
+     .wav or .aif/.aiff files. Press Play in Logic, then move the Station slider.
+
+UNINSTALL
+  Delete the .component and .vst3 files from the folders in step 2.
