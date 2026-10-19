@@ -1,0 +1,112 @@
+// Developer tool (not part of the plug-in): renders the plug-in's editor to PNG files, without a screen,
+// so the look of the interface can be checked from a build machine. Enabled with -DRM_BUILD_SNAPSHOT=ON.
+//
+//   EditorSnapshot <output folder>
+#include "Plugin/PluginEditor.h"
+#include <chrono>
+#include <thread>
+
+static void writeTone (const juce::File& file, double rate, double seconds, double freq)
+{
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::OutputStream> out (file.createOutputStream());
+    auto w = wav.createWriterFor (out, juce::AudioFormatWriterOptions().withSampleRate (rate)
+                                                                         .withNumChannels (1)
+                                                                         .withBitsPerSample (16));
+    const int64_t len = (int64_t) (seconds * rate);
+    juce::AudioBuffer<float> buf (1, 4096);
+    for (int64_t pos = 0; pos < len; pos += 4096)
+    {
+        const int n = (int) std::min<int64_t> (4096, len - pos);
+        for (int i = 0; i < n; ++i)
+            buf.setSample (0, i, 0.4f * (float) std::sin (2.0 * 3.14159265358979 * freq * (double) (pos + i) / rate));
+        w->writeFromAudioSampleBuffer (buf, 0, n);
+    }
+}
+
+static void pump (RadioMusicProcessor& p, double seconds)
+{
+    juce::AudioBuffer<float> buf (2, 512);
+    juce::MidiBuffer midi;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int blocks = (int) (seconds * 48000.0 / 512.0);
+    for (int b = 0; b < blocks; ++b)
+    {
+        buf.clear();
+        p.processBlock (buf, midi);
+        std::this_thread::sleep_until (t0 + std::chrono::duration<double> ((b + 1) * 512.0 / 48000.0));
+    }
+}
+
+static void snap (RadioMusicProcessor& p, const juce::File& png)
+{
+    std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
+    ed->setVisible (true);
+    juce::Thread::sleep (50);
+    auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 2.0f);
+    juce::PNGImageFormat fmt;
+    png.deleteFile();
+    juce::FileOutputStream out (png);
+    fmt.writeImageToStream (img, out);
+    std::cout << "wrote " << png.getFullPathName() << " (" << img.getWidth() << "x" << img.getHeight() << ")\n";
+}
+
+static void setParam (RadioMusicProcessor& p, const char* id, float realValue)
+{
+    auto* prm = p.apvts.getParameter (id);
+    prm->setValueNotifyingHost (prm->convertTo0to1 (realValue));
+}
+
+int main (int argc, char** argv)
+{
+    juce::ScopedJuceInitialiser_GUI gui;
+
+    const juce::File outDir (argc > 1 ? juce::String (argv[1]) : juce::String ("."));
+    outDir.createDirectory();
+
+    auto root = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rm_snapshot");
+    root.deleteRecursively();
+    auto folder = root.getChildFile ("Field Recordings"); folder.createDirectory();
+    const char* names[] = { "Would it look the same 2.aif", "BBC Radio 3 evening", "Shortwave 6 MHz night", "Numbers station",
+                            "Tape loop 01", "Tape loop 02", "Street market Lisbon", "Late night phone-in", "Ferry horn", "Static and hiss", "Choir rehearsal", "Last station" };
+    int k = 0;
+    for (auto* n : names)
+    {
+        auto f = folder.getChildFile (juce::String (n).replace (".aif", "") + ".wav");
+        writeTone (f, 48000.0, 40.0 + 3.0 * k, 110.0 * std::pow (2.0, k / 12.0));
+        ++k;
+    }
+
+    RadioMusicProcessor proc;
+    proc.prepareToPlay (48000.0, 512);
+
+    // 1. empty state
+    snap (proc, outDir.getChildFile ("1_no_folder.png"));
+
+    // 2. playing, loop window set
+    proc.setSampleFolder (folder);
+    for (int i = 0; i < 100 && proc.getLibrary() == nullptr; ++i) juce::Thread::sleep (50);
+    setParam (proc, "station", 0.30f);
+    setParam (proc, "start", 0.20f);
+    setParam (proc, "end", 0.55f);
+    setParam (proc, "crossfade", 1500.0f);
+    setParam (proc, "volume", -6.0f);
+    setParam (proc, "pause", 0.0f);
+    pump (proc, 2.5);
+    snap (proc, outDir.getChildFile ("2_playing.png"));
+
+    // 3. reversed window, ping-pong, a few options on
+    setParam (proc, "station", 0.80f);
+    setParam (proc, "start", 0.85f);
+    setParam (proc, "end", 0.35f);
+    setParam (proc, "loopMode", 2.0f);
+    setParam (proc, "pause", 1.0f);
+    setParam (proc, "hostSync", 1.0f);
+    setParam (proc, "radioStart", 0.0f);
+    setParam (proc, "crossfade", 25.0f);
+    pump (proc, 1.5);
+    snap (proc, outDir.getChildFile ("3_reverse_pingpong.png"));
+
+    root.deleteRecursively();
+    return 0;
+}

@@ -78,6 +78,25 @@ juce::AudioProcessorValueTreeState::ParameterLayout RadioMusicProcessor::createL
         NormalisableRange<float> (-60.0f, 6.0f, 0.0f, 1.0f), 0.0f,
         AudioParameterFloatAttributes().withLabel ("dB")));
 
+    // Milestone 2. Start and End are positions in the file, 0 = start of the file, 1 = end.
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "start", 1 }, "Start",
+        NormalisableRange<float> (0.0f, 1.0f, 0.0f), 0.0f));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "end", 1 }, "End",
+        NormalisableRange<float> (0.0f, 1.0f, 0.0f), 1.0f));
+
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "loopMode", 1 }, "Loop mode",
+        StringArray { "Off", "Forward", "Ping-pong" }, 1));
+
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "pause", 1 }, "Pause", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "reset", 1 }, "Reset", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "radioStart", 1 }, "Radio start", true));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "startImmediate", 1 }, "Start immediate", false));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "hostSync", 1 }, "Host sync", false));
+
     return layout;
 }
 
@@ -89,6 +108,14 @@ RadioMusicProcessor::RadioMusicProcessor()
     stationParam   = apvts.getRawParameterValue ("station");
     crossfadeParam = apvts.getRawParameterValue ("crossfade");
     volumeParam    = apvts.getRawParameterValue ("volume");
+    startParam     = apvts.getRawParameterValue ("start");
+    endParam       = apvts.getRawParameterValue ("end");
+    loopParam      = apvts.getRawParameterValue ("loopMode");
+    pauseParam     = apvts.getRawParameterValue ("pause");
+    resetParam     = apvts.getRawParameterValue ("reset");
+    radioStartParam = apvts.getRawParameterValue ("radioStart");
+    immediateParam = apvts.getRawParameterValue ("startImmediate");
+    hostSyncParam  = apvts.getRawParameterValue ("hostSync");
 }
 
 RadioMusicProcessor::~RadioMusicProcessor() = default;
@@ -108,7 +135,7 @@ void RadioMusicProcessor::prepareToPlay (double sampleRate, int)
 void RadioMusicProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
-    midi.clear();   // milestone 1 ignores MIDI
+    midi.clear();   // MIDI is not used yet (planned for a later milestone)
 
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
@@ -118,6 +145,35 @@ void RadioMusicProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     rm::RadioEngine::Params p;
     p.station     = stationParam->load();
     p.crossfadeMs = crossfadeParam->load();
+    p.startNorm   = startParam->load();
+    p.endNorm     = endParam->load();
+    p.loopMode    = juce::jlimit (0, 2, (int) std::lround (loopParam->load()));
+    p.paused      = pauseParam->load() > 0.5f;
+    p.radioStart  = radioStartParam->load() > 0.5f;
+    p.startImmediate = immediateParam->load() > 0.5f;
+
+    // Reset: a rising edge on the Reset parameter (host automation) restarts the tuned station.
+    const bool resetNow = resetParam->load() > 0.5f;
+    if (resetNow && ! prevReset)
+        engine.requestReset();
+    prevReset = resetNow;
+
+    // Host sync: the radio clock follows the DAW's sample position. If the host gives no position, stay free-running.
+    if (hostSyncParam->load() > 0.5f)
+    {
+        if (auto* head = getPlayHead())
+        {
+            if (auto pos = head->getPosition())
+            {
+                if (auto samples = pos->getTimeInSamples())
+                {
+                    p.hostSync    = true;
+                    p.hostPlaying = pos->getIsPlaying();
+                    p.hostSamples = *samples;
+                }
+            }
+        }
+    }
 
     float* left = buffer.getWritePointer (0);
     engine.process (left, numSamples, p);
@@ -125,8 +181,13 @@ void RadioMusicProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     const float dB = volumeParam->load();
     volumeSmoothed.setTargetValue (dB <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (dB, -60.0f));
 
+    float peak = 0.0f;
     for (int i = 0; i < numSamples; ++i)
+    {
         left[i] *= volumeSmoothed.getNextValue();
+        peak = std::max (peak, std::fabs (left[i]));
+    }
+    outputPeak.store (peak, std::memory_order_relaxed);
 
     for (int ch = 1; ch < numChannels; ++ch)
         buffer.copyFrom (ch, 0, left, numSamples);

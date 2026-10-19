@@ -1,53 +1,551 @@
 #include "PluginEditor.h"
 
+namespace rmui
+{
+namespace colours
+{
+    const juce::Colour bg        { 0xff14120e };
+    const juce::Colour panel     { 0xff1e1a15 };
+    const juce::Colour panelEdge { 0xff332b21 };
+    const juce::Colour glassTop  { 0xff2c2217 };
+    const juce::Colour glassBot  { 0xff17110a };
+    const juce::Colour amber     { 0xffffb347 };
+    const juce::Colour amberDim  { 0xff8f5f1f };
+    const juce::Colour cream     { 0xffeee3cf };
+    const juce::Colour dim       { 0xff8f8470 };
+    const juce::Colour knobBody  { 0xff2a251e };
+    const juce::Colour knobRim   { 0xff3d352a };
+}
+
+static juce::Font uiFont (float size, bool bold = false)
+{
+    return juce::Font (juce::FontOptions (size, bold ? juce::Font::bold : juce::Font::plain));
+}
+
+static juce::Font monoFont (float size)
+{
+    return juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), size, juce::Font::plain));
+}
+
+static juce::String formatTime (double seconds)
+{
+    if (seconds < 0.0) seconds = 0.0;
+    const int total = (int) seconds;
+    const int h = total / 3600, m = (total / 60) % 60, s = total % 60;
+    if (h > 0)
+        return juce::String (h) + ":" + juce::String (m).paddedLeft ('0', 2) + ":" + juce::String (s).paddedLeft ('0', 2);
+    return juce::String (m) + ":" + juce::String (s).paddedLeft ('0', 2);
+}
+
+// Shortens text from the left ("...folder/name") so the end of a path stays visible.
+static juce::String fitTail (const juce::String& text, const juce::Font& font, float maxWidth)
+{
+    auto width = [&] (const juce::String& s)
+    {
+        juce::GlyphArrangement ga;
+        ga.addLineOfText (font, s, 0.0f, 0.0f);
+        return ga.getBoundingBox (0, -1, true).getWidth();
+    };
+
+    if (width (text) <= maxWidth)
+        return text;
+
+    juce::String s = text;
+    while (s.length() > 4 && width (juce::String (juce::CharPointer_UTF8 ("\xe2\x80\xa6")) + s) > maxWidth)
+        s = s.substring (1);
+
+    return juce::String (juce::CharPointer_UTF8 ("\xe2\x80\xa6")) + s;
+}
+
+//==============================================================================
+Knob::Knob (const juce::String& captionText, std::function<juce::String (double)> formatter)
+    : caption (captionText), format (std::move (formatter))
+{
+    setSliderStyle (juce::Slider::RotaryVerticalDrag);
+    setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    setMouseDragSensitivity (220);
+}
+
+void Knob::paint (juce::Graphics& g)
+{
+    using namespace colours;
+    auto b = getLocalBounds().toFloat();
+    auto textArea = b.removeFromBottom (32.0f);
+    auto valueArea = textArea.removeFromTop (16.0f);
+    auto captionArea = textArea;
+    const float d = std::min (b.getWidth(), b.getHeight()) - 6.0f;
+    const auto c = b.getCentre();
+    const juce::Rectangle<float> face (c.x - d * 0.5f, c.y - d * 0.5f, d, d);
+
+    const float start = juce::degreesToRadians (-135.0f);
+    const float end   = juce::degreesToRadians (135.0f);
+    const float prop  = (float) valueToProportionOfLength (getValue());
+    const float angle = start + prop * (end - start);
+
+    // value ring
+    const float ringR = d * 0.5f;
+    juce::Path track, value;
+    track.addCentredArc (c.x, c.y, ringR, ringR, 0.0f, start, end, true);
+    value.addCentredArc (c.x, c.y, ringR, ringR, 0.0f, start, angle, true);
+    g.setColour (panelEdge);
+    g.strokePath (track, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    if (prop > 0.001f)
+    {
+        g.setColour (amber.withAlpha (0.25f));
+        g.strokePath (value, juce::PathStrokeType (8.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        g.setColour (amber);
+        g.strokePath (value, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+
+    // knob body
+    const auto body = face.reduced (9.0f);
+    g.setGradientFill (juce::ColourGradient (knobRim, body.getX(), body.getY(), knobBody.darker (0.4f), body.getRight(), body.getBottom(), false));
+    g.fillEllipse (body);
+    g.setColour (knobRim.brighter (0.2f));
+    g.drawEllipse (body, 1.0f);
+
+    // pointer
+    const float r1 = body.getWidth() * 0.5f - 3.0f, r0 = r1 * 0.38f;
+    const float sx = std::sin (angle), sy = -std::cos (angle);
+    g.setColour (cream);
+    g.drawLine (c.x + sx * r0, c.y + sy * r0, c.x + sx * r1, c.y + sy * r1, 2.5f);
+
+    // value under the knob, caption under the value
+    g.setColour (cream);
+    g.setFont (monoFont (11.5f));
+    g.drawText (format (getValue()), valueArea, juce::Justification::centred, false);
+
+    g.setColour (dim);
+    g.setFont (uiFont (10.5f, true));
+    g.drawText (caption, captionArea, juce::Justification::centred, false);
+
+    if (hasKeyboardFocus (false))
+    {
+        g.setColour (amber.withAlpha (0.5f));
+        g.drawEllipse (face.expanded (2.0f), 1.0f);
+    }
+}
+
+//==============================================================================
+RmButton::RmButton (const juce::String& label, Style s) : juce::Button (label), style (s)
+{
+    if (style == Style::Pill)
+        setClickingTogglesState (true);
+}
+
+void RmButton::tick()
+{
+    if (flashFrames > 0)
+    {
+        --flashFrames;
+        repaint();
+    }
+}
+
+void RmButton::paintButton (juce::Graphics& g, bool over, bool down)
+{
+    using namespace colours;
+    auto b = getLocalBounds().toFloat().reduced (1.0f);
+
+    if (style == Style::Round)
+    {
+        const float d = std::min (b.getWidth(), b.getHeight());
+        const auto face = juce::Rectangle<float> (d, d).withCentre (b.getCentre());
+        const bool lit = down || flashFrames > 0;
+        if (lit)
+        {
+            g.setColour (amber.withAlpha (0.3f));
+            g.fillEllipse (face.expanded (5.0f));
+        }
+        g.setGradientFill (juce::ColourGradient (lit ? amber : knobRim.brighter (over ? 0.15f : 0.0f), face.getX(), face.getY(),
+                                                 lit ? amberDim : knobBody.darker (0.3f), face.getRight(), face.getBottom(), false));
+        g.fillEllipse (face);
+        g.setColour (lit ? amber.brighter (0.3f) : panelEdge.brighter (0.4f));
+        g.drawEllipse (face, 1.5f);
+        g.setColour (lit ? juce::Colours::black.withAlpha (0.8f) : cream);
+        g.setFont (uiFont (11.0f, true));
+        g.drawText (getButtonText(), face, juce::Justification::centred, false);
+        return;
+    }
+
+    const bool on = getToggleState();
+    const float radius = style == Style::Pill ? b.getHeight() * 0.5f : 6.0f;
+    g.setColour (on ? amber.withAlpha (0.14f) : panel);
+    g.fillRoundedRectangle (b, radius);
+    g.setColour (on ? amber.withAlpha (0.8f) : (over ? dim : panelEdge));
+    g.drawRoundedRectangle (b, radius, 1.2f);
+
+    float textLeft = b.getX();
+    if (style == Style::Pill)
+    {
+        const float led = 7.0f;
+        const juce::Rectangle<float> ledRect (b.getX() + 9.0f, b.getCentreY() - led * 0.5f, led, led);
+        if (on)
+        {
+            g.setColour (amber.withAlpha (0.35f));
+            g.fillEllipse (ledRect.expanded (3.0f));
+        }
+        g.setColour (on ? amber : panelEdge.brighter (0.3f));
+        g.fillEllipse (ledRect);
+        textLeft = ledRect.getRight() + 6.0f;
+    }
+
+    g.setColour (on ? cream : dim);
+    g.setFont (uiFont (9.5f, true));
+    g.drawText (getButtonText(), juce::Rectangle<float> (textLeft, b.getY(), b.getRight() - textLeft - 4.0f, b.getHeight()),
+                style == Style::Pill ? juce::Justification::centredLeft : juce::Justification::centred, true);
+}
+
+//==============================================================================
+Segmented::Segmented (juce::RangedAudioParameter& param, juce::StringArray labels)
+    : names (std::move (labels)),
+      attachment (param, [this] (float v) { selected = juce::jlimit (0, names.size() - 1, (int) std::lround (v)); repaint(); })
+{
+    attachment.sendInitialUpdate();
+}
+
+void Segmented::paint (juce::Graphics& g)
+{
+    using namespace colours;
+    auto b = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (panel);
+    g.fillRoundedRectangle (b, 6.0f);
+    g.setColour (panelEdge);
+    g.drawRoundedRectangle (b, 6.0f, 1.2f);
+
+    float totalWeight = 0.0f;
+    for (auto& n : names) totalWeight += (float) n.length() + 3.0f;
+
+    float x = b.getX();
+    for (int i = 0; i < names.size(); ++i)
+    {
+        const float w = b.getWidth() * ((float) names[i].length() + 3.0f) / totalWeight;
+        auto seg = juce::Rectangle<float> (x, b.getY(), w, b.getHeight()).reduced (2.0f);
+        x += w;
+        if (i == selected)
+        {
+            g.setColour (amber);
+            g.fillRoundedRectangle (seg, 4.5f);
+        }
+        g.setColour (i == selected ? juce::Colours::black.withAlpha (0.85f) : dim);
+        g.setFont (uiFont (9.5f, true));
+        g.drawText (names[i], seg, juce::Justification::centred, false);
+    }
+}
+
+void Segmented::mouseDown (const juce::MouseEvent& e)
+{
+    float totalWeight = 0.0f;
+    for (auto& n : names) totalWeight += (float) n.length() + 3.0f;
+
+    const float px = e.position.x - 1.0f;
+    const float inner = (float) getWidth() - 2.0f;
+    float x = 0.0f;
+    for (int i = 0; i < names.size(); ++i)
+    {
+        x += inner * ((float) names[i].length() + 3.0f) / totalWeight;
+        if (px < x || i == names.size() - 1)
+        {
+            attachment.setValueAsCompleteGesture ((float) i);
+            return;
+        }
+    }
+}
+
+//==============================================================================
+DialDisplay::DialDisplay (RadioMusicProcessor& p)
+    : processor (p),
+      attachment (*p.apvts.getParameter ("station"), [this] (float v) { stationValue = v; repaint(); })
+{
+    attachment.sendInitialUpdate();
+}
+
+juce::Rectangle<float> DialDisplay::scaleArea() const
+{
+    return juce::Rectangle<float> (28.0f, 74.0f, (float) getWidth() - 56.0f, 64.0f);
+}
+
+void DialDisplay::dragTo (float x)
+{
+    const auto s = scaleArea();
+    const float v = juce::jlimit (0.0f, 1.0f, (x - s.getX()) / s.getWidth());
+    attachment.setValueAsPartOfGesture (v);
+}
+
+void DialDisplay::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.position.y < 60.0f || e.position.y > 160.0f)
+        return;
+    dragging = true;
+    attachment.beginGesture();
+    dragTo (e.position.x);
+}
+
+void DialDisplay::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragging)
+        dragTo (e.position.x);
+}
+
+void DialDisplay::mouseUp (const juce::MouseEvent&)
+{
+    if (dragging)
+    {
+        dragging = false;
+        attachment.endGesture();
+    }
+}
+
+void DialDisplay::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
+{
+    const int count = processor.getEngine().getNumStations();
+    if (count < 1)
+        return;
+
+    const float delta = std::fabs (w.deltaY) > 0.0001f ? w.deltaY : w.deltaX;
+    if (std::fabs (delta) < 0.0001f)
+        return;
+
+    const int idx = juce::jlimit (0, count - 1, (int) std::floor (stationValue * (float) count));
+    const int next = juce::jlimit (0, count - 1, idx + (delta > 0.0f ? 1 : -1) * (w.isReversed ? -1 : 1));
+    attachment.setValueAsCompleteGesture (((float) next + 0.5f) / (float) count);
+}
+
+void DialDisplay::paint (juce::Graphics& g)
+{
+    using namespace colours;
+    const auto& engine = processor.getEngine();
+    const auto folder = processor.getSampleFolder();
+    const auto lib = processor.getLibrary();
+    const int count = engine.getNumStations();
+    const int idx = engine.getDisplayedStation();
+    const bool haveStations = lib != nullptr && ! lib->stations.empty() && count > 0;
+
+    auto bounds = getLocalBounds().toFloat();
+
+    // glass panel
+    g.setGradientFill (juce::ColourGradient (glassTop, 0.0f, 0.0f, glassBot, 0.0f, bounds.getHeight(), false));
+    g.fillRoundedRectangle (bounds, 14.0f);
+    g.setColour (panelEdge);
+    g.drawRoundedRectangle (bounds.reduced (0.5f), 14.0f, 1.5f);
+
+    // ---- station name ----
+    auto top = bounds.reduced (28.0f, 0.0f).withTrimmedTop (14.0f).withHeight (46.0f);
+    juce::String name, number;
+    if (folder == juce::File())
+        name = "Choose a folder of WAV or AIFF files";
+    else if (lib == nullptr)
+        name = "Scanning...";
+    else if (lib->stations.empty())
+        name = "No playable WAV or AIFF files in that folder";
+    else if (idx >= 0 && idx < (int) lib->stations.size())
+    {
+        name = lib->stations[(size_t) idx].file.getFileName();
+        number = juce::String (idx + 1).paddedLeft ('0', 2) + " / " + juce::String (count).paddedLeft ('0', 2);
+    }
+
+    g.setColour (haveStations ? cream : dim);
+    g.setFont (uiFont (haveStations ? 24.0f : 18.0f, haveStations));
+    g.drawText (name, top.withTrimmedRight (110.0f), juce::Justification::centredLeft, true);
+
+    if (number.isNotEmpty())
+    {
+        g.setColour (amber);
+        g.setFont (monoFont (20.0f));
+        g.drawText (number, top.removeFromRight (108.0f), juce::Justification::centredRight, false);
+    }
+
+    // ---- tuning scale ----
+    const auto sc = scaleArea();
+    g.setColour (juce::Colours::black.withAlpha (0.35f));
+    g.fillRoundedRectangle (sc.expanded (10.0f, 4.0f), 8.0f);
+
+    const int decoCount = 48;
+    const int n = haveStations ? count : decoCount;
+    const float spacing = sc.getWidth() / (float) n;
+    const int labelEvery = std::max (1, (int) std::ceil (46.0f / spacing));
+
+    for (int i = 0; i < n; ++i)
+    {
+        const float x = sc.getX() + ((float) i + 0.5f) * spacing;
+        const bool selected = haveStations && i == idx;
+        const bool major = (i % 5) == 0;
+        const float h = selected ? sc.getHeight() * 0.66f : (major ? sc.getHeight() * 0.50f : sc.getHeight() * 0.36f);
+
+        if (spacing > 26.0f)                                   // fine ticks between stations, like a radio dial
+            for (int m = 1; m < 5; ++m)
+            {
+                const float mx = x - spacing * 0.5f + spacing * (float) m / 5.0f;
+                g.setColour (dim.withAlpha (0.28f));
+                g.drawLine (mx, sc.getY() + 2.0f, mx, sc.getY() + 2.0f + sc.getHeight() * 0.16f, 1.0f);
+            }
+
+        if (selected)
+        {
+            g.setColour (amber.withAlpha (0.28f));
+            g.drawLine (x, sc.getY() + 2.0f, x, sc.getY() + 2.0f + h, 6.0f);
+        }
+        g.setColour (selected ? amber : (haveStations ? dim.withAlpha (major ? 0.9f : 0.55f) : dim.withAlpha (0.25f)));
+        g.drawLine (x, sc.getY() + 2.0f, x, sc.getY() + 2.0f + h, selected ? 2.0f : (spacing > 3.0f ? 1.4f : 1.0f));
+
+        if (haveStations && (i % labelEvery) == 0 && (selected || spacing >= 14.0f || major))
+        {
+            g.setColour (selected ? amber : dim);
+            g.setFont (monoFont (10.5f));
+            g.drawText (juce::String (i + 1), juce::Rectangle<float> (x - 14.0f, sc.getBottom() - 16.0f, 28.0f, 14.0f),
+                        juce::Justification::centred, false);
+        }
+    }
+
+    // needle (follows the Station parameter continuously)
+    {
+        const float x = sc.getX() + juce::jlimit (0.0f, 1.0f, stationValue) * sc.getWidth();
+        g.setColour (amber.withAlpha (0.18f));
+        g.drawLine (x, sc.getY() - 6.0f, x, sc.getBottom() + 4.0f, 9.0f);
+        g.setColour (amber.withAlpha (0.9f));
+        g.drawLine (x, sc.getY() - 6.0f, x, sc.getBottom() + 4.0f, 2.0f);
+        juce::Path tri;
+        tri.addTriangle (x - 5.0f, sc.getY() - 12.0f, x + 5.0f, sc.getY() - 12.0f, x, sc.getY() - 4.0f);
+        g.setColour (amber);
+        g.fillPath (tri);
+    }
+
+    // ---- file position / loop window bar ----
+    const juce::Rectangle<float> bar (28.0f, bounds.getHeight() - 42.0f, bounds.getWidth() - 56.0f, 14.0f);
+    g.setColour (juce::Colours::black.withAlpha (0.45f));
+    g.fillRoundedRectangle (bar, 4.0f);
+
+    const double lo = engine.getWindowLo(), hi = engine.getWindowHi();
+    const bool rev = engine.isWindowReversed();
+    const auto win = juce::Rectangle<float> (bar.getX() + (float) lo * bar.getWidth(), bar.getY(),
+                                             std::max (3.0f, (float) (hi - lo) * bar.getWidth()), bar.getHeight());
+    g.setColour (amber.withAlpha (0.22f));
+    g.fillRoundedRectangle (win, 3.0f);
+    g.setColour (amber.withAlpha (0.65f));
+    g.drawRoundedRectangle (win, 3.0f, 1.0f);
+
+    // direction chevrons inside the window
+    {
+        juce::Path chev;
+        const float cy = win.getCentreY();
+        const float cx = win.getCentreX();
+        const float s = 3.6f;
+        if (win.getWidth() > 18.0f)
+        {
+            if (rev) chev.addTriangle (cx + s, cy - s, cx + s, cy + s, cx - s, cy);
+            else     chev.addTriangle (cx - s, cy - s, cx - s, cy + s, cx + s, cy);
+            g.setColour (amber.withAlpha (0.7f));
+            g.fillPath (chev);
+        }
+    }
+
+    const double pos = engine.getPlayPosition();
+    juce::String posText;
+    if (pos >= 0.0)
+    {
+        const float x = bar.getX() + (float) pos * bar.getWidth();
+        g.setColour (cream.withAlpha (0.25f));
+        g.drawLine (x, bar.getY() - 3.0f, x, bar.getBottom() + 3.0f, 6.0f);
+        g.setColour (cream);
+        g.drawLine (x, bar.getY() - 3.0f, x, bar.getBottom() + 3.0f, 2.0f);
+
+        if (lib != nullptr && idx >= 0 && idx < (int) lib->stations.size())
+        {
+            const auto& info = lib->stations[(size_t) idx].info;
+            if (info.sampleRate > 0.0)
+                posText = formatTime (pos * (double) info.numFrames / info.sampleRate) + " / "
+                          + formatTime ((double) info.numFrames / info.sampleRate);
+        }
+    }
+
+    g.setColour (dim);
+    g.setFont (uiFont (9.5f, true));
+    g.drawText ("FILE POSITION AND LOOP WINDOW", juce::Rectangle<float> (bar.getX(), bar.getBottom() + 2.0f, 260.0f, 14.0f),
+                juce::Justification::centredLeft, false);
+    g.setFont (monoFont (10.0f));
+    g.drawText (posText, juce::Rectangle<float> (bar.getRight() - 200.0f, bar.getBottom() + 2.0f, 200.0f, 14.0f),
+                juce::Justification::centredRight, false);
+}
+} // namespace rmui
+
+//==============================================================================
+namespace
+{
+    juce::String formatCrossfade (double ms)
+    {
+        if (ms < 10.0)    return juce::String (ms, 1) + " ms";
+        if (ms < 1000.0)  return juce::String ((int) std::lround (ms)) + " ms";
+        if (ms < 10000.0) return juce::String (ms / 1000.0, 2) + " s";
+        return juce::String (ms / 1000.0, 1) + " s";
+    }
+
+    juce::String formatVolume (double dB)
+    {
+        if (dB <= -59.9) return "-inf";
+        return juce::String (dB, 1) + " dB";
+    }
+
+    juce::String formatPercent (double norm, int divider)
+    {
+        const int step = rm::quantiseStep ((float) norm, divider);
+        return juce::String ((double) step * 100.0 / (double) rm::kStartSteps, 1) + "%";
+    }
+}
+
 RadioMusicEditor::RadioMusicEditor (RadioMusicProcessor& p)
     : AudioProcessorEditor (&p),
       processor (p),
-      stationAttach   (p.apvts, "station",   stationSlider),
-      crossfadeAttach (p.apvts, "crossfade", crossfadeSlider),
-      volumeAttach    (p.apvts, "volume",    volumeSlider)
+      dial (p),
+      startKnob ("START",     [] (double v) { return formatPercent (v, rm::kStartDivider); }),
+      endKnob ("END",         [] (double v) { return formatPercent (v, 1); }),
+      crossfadeKnob ("CROSSFADE", [] (double v) { return formatCrossfade (v); }),
+      volumeKnob ("VOLUME",   [] (double v) { return formatVolume (v); }),
+      resetButton ("RESET", rmui::RmButton::Style::Round),
+      pauseButton ("PAUSE", rmui::RmButton::Style::Pill),
+      hostSyncButton ("HOST SYNC", rmui::RmButton::Style::Pill),
+      radioStartButton ("RADIO START", rmui::RmButton::Style::Pill),
+      immediateButton ("START NOW", rmui::RmButton::Style::Pill),
+      folderButton ("CHOOSE FOLDER", rmui::RmButton::Style::Flat),
+      loopSelector (*p.apvts.getParameter ("loopMode"), juce::StringArray { "OFF", "LOOP", "PING-PONG" }),
+      startAttach     (p.apvts, "start",     startKnob),
+      endAttach       (p.apvts, "end",       endKnob),
+      crossfadeAttach (p.apvts, "crossfade", crossfadeKnob),
+      volumeAttach    (p.apvts, "volume",    volumeKnob),
+      pauseAttach      (p.apvts, "pause",          pauseButton),
+      hostSyncAttach   (p.apvts, "hostSync",       hostSyncButton),
+      radioStartAttach (p.apvts, "radioStart",     radioStartButton),
+      immediateAttach  (p.apvts, "startImmediate", immediateButton)
 {
-    setSize (520, 330);
+    setSize (800, 520);
 
-    addAndMakeVisible (chooseButton);
-    chooseButton.onClick = [this] { chooseFolder(); };
+    for (juce::Component* c : std::initializer_list<juce::Component*> {
+             &dial, &startKnob, &endKnob, &crossfadeKnob, &volumeKnob, &resetButton, &pauseButton,
+             &hostSyncButton, &radioStartButton, &immediateButton, &folderButton, &loopSelector })
+        addAndMakeVisible (c);
 
-    for (auto* l : { &folderLabel, &stationLabel, &statusLabel, &aboutLabel })
-    {
-        addAndMakeVisible (l);
-        l->setJustificationType (juce::Justification::centredLeft);
-    }
+    startKnob.setDoubleClickReturnValue (true, 0.0);
+    endKnob.setDoubleClickReturnValue (true, 1.0);
+    crossfadeKnob.setDoubleClickReturnValue (true, 25.0);
+    volumeKnob.setDoubleClickReturnValue (true, 0.0);
 
-    folderLabel.setFont (juce::FontOptions (13.0f));
-    stationLabel.setFont (juce::FontOptions (20.0f, juce::Font::bold));
-    statusLabel.setFont (juce::FontOptions (12.0f));
-    aboutLabel.setFont (juce::FontOptions (11.0f));
-    aboutLabel.setJustificationType (juce::Justification::topLeft);
-    aboutLabel.setText ("Unofficial plugin inspired by Radio Music mk2 by Music Thing Modular "
-                        "(designed by Tom Whitwell with Chris Johnson of Plus Minus Audio). "
-                        "Not affiliated with or endorsed by Music Thing Modular. "
-                        "Open source (AGPLv3), clean-room implementation from the published documentation.",
-                        juce::dontSendNotification);
+    resetButton.onClick  = [this] { processor.triggerReset(); resetButton.flash(); };
+    folderButton.onClick = [this] { chooseFolder(); };
 
-    struct SliderSetup { juce::Slider* s; juce::Label* c; const char* text; };
-    for (auto& e : { SliderSetup { &stationSlider,   &stationCaption,   "Station" },
-                     SliderSetup { &crossfadeSlider, &crossfadeCaption, "Crossfade" },
-                     SliderSetup { &volumeSlider,    &volumeCaption,    "Volume" } })
-    {
-        addAndMakeVisible (e.s);
-        addAndMakeVisible (e.c);
-        e.s->setSliderStyle (juce::Slider::LinearHorizontal);
-        e.c->setText (e.text, juce::dontSendNotification);
-    }
+    addHint (dial,             "Drag along the dial (or use the mouse wheel) to tune. Each audio file in the folder is a station, in file-name order.");
+    addHint (startKnob,        "Where playback starts, and the left edge of the loop. Takes effect on RESET unless START NOW is on. If START is right of END, the loop plays in reverse.");
+    addHint (endKnob,          "The right edge of the loop. START at far left with END at either edge plays the whole file.");
+    addHint (resetButton,      "Restart the tuned station from START.");
+    addHint (crossfadeKnob,    "How long it takes to blend from one station to the next when you tune. Double-click to reset to 25 ms.");
+    addHint (volumeKnob,       "Output level. Double-click to reset to 0 dB.");
+    addHint (loopSelector,     "OFF: stop at the end of the loop until RESET or retuning. LOOP: repeat. PING-PONG: forwards, then backwards.");
+    addHint (pauseButton,      "Tape-style stop: the speed slows to zero, and back up again when released.");
+    addHint (radioStartButton, "ON: every file keeps playing in the background, like tuning a radio. OFF: a station restarts from START when you tune to it.");
+    addHint (immediateButton,  "ON: moving START takes effect straight away instead of waiting for RESET.");
+    addHint (hostSyncButton,   "ON: the radio clock follows the DAW's play position, so bounces repeat exactly. Silent while the transport is stopped.");
+    addHint (folderButton,     "Choose the folder of WAV or AIFF files to play.");
 
-    stationSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-    crossfadeSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 20);
-    crossfadeSlider.setTextValueSuffix (" ms");
-    volumeSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 20);
-    volumeSlider.setTextValueSuffix (" dB");
-
-    refreshStatus();
-    startTimerHz (10);
+    addMouseListener (this, true);
+    startTimerHz (30);
 }
 
 RadioMusicEditor::~RadioMusicEditor()
@@ -55,40 +553,147 @@ RadioMusicEditor::~RadioMusicEditor()
     stopTimer();
 }
 
-void RadioMusicEditor::paint (juce::Graphics& g)
+void RadioMusicEditor::addHint (juce::Component& c, const juce::String& text)
 {
-    g.fillAll (juce::Colour (0xff1c1c1e));
-    g.setColour (juce::Colours::white);
-    g.setFont (juce::FontOptions (18.0f, juce::Font::bold));
-    g.drawText ("Radio Music (unofficial)", 16, 8, getWidth() - 32, 24, juce::Justification::centredLeft);
+    hints[&c] = text;
+}
+
+void RadioMusicEditor::mouseEnter (const juce::MouseEvent& e)
+{
+    auto it = hints.find (e.eventComponent);
+    if (it != hints.end() && currentHint != it->second)
+    {
+        currentHint = it->second;
+        repaint (getLocalBounds().removeFromBottom (110));
+    }
+}
+
+void RadioMusicEditor::mouseExit (const juce::MouseEvent& e)
+{
+    auto it = hints.find (e.eventComponent);
+    if (it != hints.end() && currentHint == it->second)
+    {
+        currentHint = {};
+        repaint (getLocalBounds().removeFromBottom (110));
+    }
 }
 
 void RadioMusicEditor::resized()
 {
-    auto r = getLocalBounds().reduced (16);
-    r.removeFromTop (28);
+    using juce::Rectangle;
 
-    auto row = r.removeFromTop (28);
-    chooseButton.setBounds (row.removeFromLeft (130));
-    row.removeFromLeft (8);
-    folderLabel.setBounds (row);
+    dial.setBounds (24, 70, 752, 212);
 
-    r.removeFromTop (10);
-    stationLabel.setBounds (r.removeFromTop (30));
-    statusLabel.setBounds (r.removeFromTop (20));
-    r.removeFromTop (8);
+    // controls panel: y 294..442
+    const int ky = 316, kw = 96, kh = 112;
+    startKnob.setBounds     (Rectangle<int> (52, ky, kw, kh));
+    resetButton.setBounds   (Rectangle<int> (168, ky + 12, 56, 56));
+    endKnob.setBounds       (Rectangle<int> (236, ky, kw, kh));
+    crossfadeKnob.setBounds (Rectangle<int> (388, ky, kw, kh));
+    volumeKnob.setBounds    (Rectangle<int> (498, ky, kw, kh));
 
-    for (auto& pair : { std::pair<juce::Label*, juce::Slider*> { &stationCaption,   &stationSlider },
-                        std::pair<juce::Label*, juce::Slider*> { &crossfadeCaption, &crossfadeSlider },
-                        std::pair<juce::Label*, juce::Slider*> { &volumeCaption,    &volumeSlider } })
+    const int rx = 620, rw = 148;
+    loopSelector.setBounds     (Rectangle<int> (rx, 318, rw, 26));
+    pauseButton.setBounds      (Rectangle<int> (rx, 350, 62, 24));
+    hostSyncButton.setBounds   (Rectangle<int> (rx + 66, 350, 82, 24));
+    radioStartButton.setBounds (Rectangle<int> (rx, 378, rw, 24));
+    immediateButton.setBounds  (Rectangle<int> (rx, 406, rw, 24));
+
+    folderButton.setBounds (Rectangle<int> (24, 482, 120, 26));
+}
+
+void RadioMusicEditor::paint (juce::Graphics& g)
+{
+    using namespace rmui::colours;
+    g.fillAll (bg);
+
+    // header
+    g.setColour (cream);
+    g.setFont (rmui::uiFont (26.0f, true));
+    g.drawText ("RADIO MUSIC", juce::Rectangle<int> (26, 14, 240, 36), juce::Justification::centredLeft, false);
+    g.setColour (amber);
+    g.setFont (rmui::uiFont (12.0f, true));
+    g.drawText ("UNOFFICIAL", juce::Rectangle<int> (200, 20, 120, 24), juce::Justification::centredLeft, false);
+
+    // radio clock
     {
-        auto line = r.removeFromTop (30);
-        pair.first->setBounds (line.removeFromLeft (80));
-        pair.second->setBounds (line);
+        auto box = juce::Rectangle<float> (560.0f, 14.0f, 216.0f, 40.0f);
+        g.setColour (glassBot);
+        g.fillRoundedRectangle (box, 8.0f);
+        g.setColour (panelEdge);
+        g.drawRoundedRectangle (box.reduced (0.5f), 8.0f, 1.2f);
+
+        const double s = processor.getEngine().getClockSeconds();
+        const int total = (int) s;
+        const juce::String t = juce::String (total / 3600) + ":" + juce::String ((total / 60) % 60).paddedLeft ('0', 2)
+                               + ":" + juce::String (total % 60).paddedLeft ('0', 2) + "." + juce::String ((int) ((s - (double) total) * 10.0));
+        g.setColour (amber);
+        g.setFont (rmui::monoFont (20.0f));
+        g.drawText (t, box.withTrimmedLeft (12.0f).withTrimmedRight (60.0f), juce::Justification::centredLeft, false);
+        g.setColour (dim);
+        g.setFont (rmui::uiFont (9.0f, true));
+        g.drawText ("RADIO CLOCK", box.removeFromRight (82.0f).withTrimmedRight (8.0f), juce::Justification::centredRight, false);
     }
 
-    r.removeFromTop (8);
-    aboutLabel.setBounds (r);
+    // output meter
+    {
+        const auto m = juce::Rectangle<float> (336.0f, 28.0f, 200.0f, 10.0f);
+        g.setColour (glassBot);
+        g.fillRoundedRectangle (m, 5.0f);
+        const float dB = meterLevel > 0.00001f ? juce::Decibels::gainToDecibels (meterLevel) : -90.0f;
+        const float prop = juce::jlimit (0.0f, 1.0f, (dB + 60.0f) / 60.0f);
+        auto fill = m.withWidth (std::max (0.0f, m.getWidth() * prop));
+        g.setColour (dB > -3.0f ? juce::Colour (0xffff6b4a) : amber);
+        g.fillRoundedRectangle (fill, 5.0f);
+        g.setColour (panelEdge);
+        g.drawRoundedRectangle (m, 5.0f, 1.0f);
+        g.setColour (dim);
+        g.setFont (rmui::uiFont (9.0f, true));
+        g.drawText ("OUTPUT", juce::Rectangle<float> (m.getX(), m.getBottom() + 3.0f, 100.0f, 12.0f), juce::Justification::centredLeft, false);
+    }
+
+    // controls panel
+    {
+        const auto panelRect = juce::Rectangle<float> (24.0f, 294.0f, 752.0f, 148.0f);
+        g.setColour (panel);
+        g.fillRoundedRectangle (panelRect, 14.0f);
+        g.setColour (panelEdge);
+        g.drawRoundedRectangle (panelRect.reduced (0.5f), 14.0f, 1.5f);
+
+        g.setColour (panelEdge);
+        g.drawLine (370.0f, 312.0f, 370.0f, 424.0f, 1.0f);
+        g.drawLine (606.0f, 312.0f, 606.0f, 424.0f, 1.0f);
+
+        g.setColour (dim);
+        g.setFont (rmui::uiFont (9.5f, true));
+        g.drawText ("LOOP WINDOW", juce::Rectangle<int> (52, 298, 280, 14), juce::Justification::centredLeft, false);
+        g.drawText ("TUNING AND LEVEL", juce::Rectangle<int> (388, 298, 200, 14), juce::Justification::centredLeft, false);
+        g.drawText ("PLAYBACK", juce::Rectangle<int> (620, 298, 150, 14), juce::Justification::centredLeft, false);
+    }
+
+    // hint line
+    g.setColour (currentHint.isEmpty() ? dim.withAlpha (0.55f) : cream.withAlpha (0.9f));
+    g.setFont (rmui::uiFont (11.0f));
+    g.drawFittedText (currentHint.isEmpty() ? juce::String ("Hover over a control to see what it does.") : currentHint,
+                      juce::Rectangle<int> (28, 448, 744, 30), juce::Justification::centredLeft, 2);
+
+    // folder path
+    {
+        const auto folder = processor.getSampleFolder();
+        const juce::String text = folder == juce::File() ? juce::String ("No folder chosen") : folder.getFullPathName();
+        const auto font = rmui::uiFont (11.0f);
+        g.setColour (dim);
+        g.setFont (font);
+        g.drawText (rmui::fitTail (text, font, 330.0f), juce::Rectangle<int> (152, 482, 340, 26), juce::Justification::centredLeft, false);
+    }
+
+    // credits
+    g.setColour (dim.withAlpha (0.85f));
+    g.setFont (rmui::uiFont (9.0f));
+    g.drawFittedText ("Unofficial plug-in inspired by Radio Music mk2 by Music Thing Modular, designed by Tom Whitwell with Chris Johnson "
+                      "of Plus Minus Audio. Not affiliated with or endorsed by Music Thing Modular. Open source (AGPLv3); clean-room "
+                      "implementation from the published documentation. Buffer underruns: " + juce::String ((int) processor.getEngine().getUnderrunCount()),
+                      juce::Rectangle<int> (500, 478, 276, 36), juce::Justification::centredRight, 4);
 }
 
 void RadioMusicEditor::chooseFolder()
@@ -115,40 +720,11 @@ void RadioMusicEditor::chooseFolder()
 
 void RadioMusicEditor::timerCallback()
 {
-    refreshStatus();
-}
+    const float peak = processor.getOutputPeak();
+    meterLevel = std::max (peak, meterLevel * 0.86f);
 
-void RadioMusicEditor::refreshStatus()
-{
-    const auto folder = processor.getSampleFolder();
-    folderLabel.setText (folder == juce::File() ? "No folder chosen" : folder.getFullPathName(),
-                         juce::dontSendNotification);
-
-    shownLibrary = processor.getLibrary();
-    const auto& engine = processor.getEngine();
-    const int count = engine.getNumStations();
-    const int idx   = engine.getDisplayedStation();
-
-    if (folder == juce::File())
-    {
-        stationLabel.setText ("Choose a folder of WAV or AIFF files", juce::dontSendNotification);
-    }
-    else if (shownLibrary == nullptr)
-    {
-        stationLabel.setText ("Scanning...", juce::dontSendNotification);
-    }
-    else if (shownLibrary->stations.empty())
-    {
-        stationLabel.setText ("No playable WAV or AIFF files found in that folder", juce::dontSendNotification);
-    }
-    else if (idx >= 0 && idx < (int) shownLibrary->stations.size())
-    {
-        stationLabel.setText ("Station " + juce::String (idx + 1) + " / " + juce::String (count)
-                                  + ":  " + shownLibrary->stations[(size_t) idx].file.getFileName(),
-                              juce::dontSendNotification);
-    }
-
-    statusLabel.setText ("Radio clock: " + juce::String (engine.getClockSeconds(), 1)
-                             + " s   |   buffer underruns: " + juce::String ((int) engine.getUnderrunCount()),
-                         juce::dontSendNotification);
+    resetButton.tick();
+    dial.repaint();
+    repaint (juce::Rectangle<int> (0, 0, getWidth(), 66));
+    repaint (juce::Rectangle<int> (0, 476, getWidth(), 44));
 }

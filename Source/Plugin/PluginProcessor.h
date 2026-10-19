@@ -69,6 +69,12 @@ public:
 
     rm::RadioEngine& getEngine() { return engine; }
 
+    // Restarts the tuned station from START (the Reset button). Safe from the message thread.
+    void triggerReset() { engine.requestReset(); }
+
+    // Output level for the meter (peak of the last block, any thread).
+    float getOutputPeak() const noexcept { return outputPeak.load(); }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -83,6 +89,17 @@ private:
     std::atomic<float>* stationParam   = nullptr;
     std::atomic<float>* crossfadeParam = nullptr;
     std::atomic<float>* volumeParam    = nullptr;
+    std::atomic<float>* startParam     = nullptr;
+    std::atomic<float>* endParam       = nullptr;
+    std::atomic<float>* loopParam      = nullptr;
+    std::atomic<float>* pauseParam     = nullptr;
+    std::atomic<float>* resetParam     = nullptr;
+    std::atomic<float>* radioStartParam = nullptr;
+    std::atomic<float>* immediateParam = nullptr;
+    std::atomic<float>* hostSyncParam  = nullptr;
+
+    bool prevReset = false;
+    std::atomic<float> outputPeak { 0.0f };
 
     juce::SmoothedValue<float> volumeSmoothed;
 

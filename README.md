@@ -10,19 +10,22 @@ in the background when you tune away, so tuning back finds them further along.
 > This project is **not affiliated with, endorsed by or supported by** Music Thing Modular or Plus Minus Audio.
 > Please support the real thing: <https://www.musicthing.co.uk/Radio-Music/>
 
-## Status: milestone 1
+## Status: milestone 2
 
 Works now:
 - Choose a folder of WAV / AIFF files. Each file is a station (sorted by file name).
-- A **Station** parameter (automatable) selects the file, with a short crossfade (adjustable, 1 ms to 60 s).
-- A free-running **radio clock**: every station has its own playhead derived from one clock, so a station you tuned
-  away from has moved on when you tune back.
+- A **Station** parameter (automatable) selects the file, with a crossfade (adjustable, 1 ms to 60 s).
+- A **radio clock**: every station has its own playhead derived from one clock, so a station you tuned
+  away from has moved on when you tune back. Free-running by default, or **host sync** to follow the DAW position.
+- **Start / End** loop window (START to the right of END plays in reverse), **loop mode** (off / loop / ping-pong),
+  a **Reset** button (and automatable Reset parameter), **Pause** (tape-style stop) and **radio start** on/off.
 - Files at any supported sample rate are played at the right speed in the session rate (linear interpolation for now).
 - Long files are streamed from disk, never loaded into memory.
+- A new tuning-dial user interface with hover help for every control.
 
-Not yet (planned milestones): reset / start / pause, looping modes, host-synced clock, speed modes (tape, notes, '90s),
-cubic interpolation and the low-fi mode, 16 banks / subfolders / `skipN` / `settings.txt`, soft and radio tuner modes,
-MIDI control, remembering the folder across sandboxed sessions.
+Not yet (planned milestones): speed modes (tape, notes, '90s), cubic interpolation and the low-fi mode,
+16 banks / subfolders / `skipN` / `settings.txt`, soft and radio tuner modes, MIDI control, remembering the folder
+across sandboxed sessions.
 
 ## How it was made (clean room)
 

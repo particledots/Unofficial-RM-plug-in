@@ -1,7 +1,82 @@
+// Radio Music (unofficial) - user interface (milestone 2).
+// An unofficial, clean-room plugin inspired by Music Thing Modular's Radio Music mk2,
+// designed by Tom Whitwell with Chris Johnson of Plus Minus Audio.
 #pragma once
 
 #include "PluginProcessor.h"
+#include <map>
 
+namespace rmui
+{
+//==============================================================================
+// Rotary knob that draws itself: arc, value in the middle, caption underneath.
+class Knob : public juce::Slider
+{
+public:
+    Knob (const juce::String& captionText, std::function<juce::String (double)> formatter);
+    void paint (juce::Graphics&) override;
+
+private:
+    juce::String caption;
+    std::function<juce::String (double)> format;
+};
+
+//==============================================================================
+// Toggle pill, or a momentary round / flat button, drawn by hand.
+class RmButton : public juce::Button
+{
+public:
+    enum class Style { Pill, Round, Flat };
+
+    RmButton (const juce::String& label, Style s);
+    void paintButton (juce::Graphics&, bool isMouseOver, bool isButtonDown) override;
+    void flash() noexcept { flashFrames = 6; repaint(); }
+    void tick();
+
+private:
+    Style style;
+    int flashFrames = 0;
+};
+
+//==============================================================================
+// Three-segment choice control (Off / Forward / Ping-pong), attached to a choice parameter.
+class Segmented : public juce::Component
+{
+public:
+    Segmented (juce::RangedAudioParameter& param, juce::StringArray labels);
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    juce::StringArray names;
+    juce::ParameterAttachment attachment;
+    int selected = 0;
+};
+
+//==============================================================================
+// The tuning dial: station scale, needle, station name, and the file position / loop window bar.
+class DialDisplay : public juce::Component
+{
+public:
+    explicit DialDisplay (RadioMusicProcessor& p);
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+private:
+    juce::Rectangle<float> scaleArea() const;
+    void dragTo (float x);
+
+    RadioMusicProcessor& processor;
+    juce::ParameterAttachment attachment;
+    float stationValue = 0.0f;
+    bool dragging = false;
+};
+} // namespace rmui
+
+//==============================================================================
 class RadioMusicEditor : public juce::AudioProcessorEditor,
                          private juce::Timer
 {
@@ -11,23 +86,28 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseEnter (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
 
 private:
     void timerCallback() override;
     void chooseFolder();
-    void refreshStatus();
+    void addHint (juce::Component& c, const juce::String& text);
 
     RadioMusicProcessor& processor;
 
-    juce::TextButton chooseButton { "Choose folder..." };
-    juce::Label folderLabel, stationLabel, statusLabel, aboutLabel;
-    juce::Label stationCaption, crossfadeCaption, volumeCaption;
-    juce::Slider stationSlider, crossfadeSlider, volumeSlider;
+    rmui::DialDisplay dial;
+    rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob;
+    rmui::RmButton resetButton, pauseButton, hostSyncButton, radioStartButton, immediateButton, folderButton;
+    rmui::Segmented loopSelector;
 
-    juce::AudioProcessorValueTreeState::SliderAttachment stationAttach, crossfadeAttach, volumeAttach;
+    juce::AudioProcessorValueTreeState::SliderAttachment startAttach, endAttach, crossfadeAttach, volumeAttach;
+    juce::AudioProcessorValueTreeState::ButtonAttachment pauseAttach, hostSyncAttach, radioStartAttach, immediateAttach;
 
     std::unique_ptr<juce::FileChooser> chooser;
-    std::shared_ptr<const rm::Library> shownLibrary;
+    std::map<juce::Component*, juce::String> hints;
+    juce::String currentHint;
+    float meterLevel = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RadioMusicEditor)
 };

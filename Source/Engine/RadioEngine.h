@@ -1,4 +1,4 @@
-// Radio Music (unofficial) - playback engine (milestone 1).
+// Radio Music (unofficial) - playback engine (milestone 2).
 // Clean-room implementation from the documented behaviour of Music Thing
 // Modular's Radio Music mk2 (Tom Whitwell with Chris Johnson).
 //
@@ -6,10 +6,13 @@
 //   * process() runs on the audio thread. It never allocates, locks or touches the disk.
 //   * A background "stream" thread opens files and reads audio into per-voice lock-free
 //     ring buffers. Only the tuned file (plus the file being crossfaded away from) is open.
-//   * setLibrary() / prepare() run on non-audio threads.
+//     The ring buffer holds audio in playing order, so reverse and ping-pong playback are
+//     produced by the stream thread and the audio thread always reads forwards.
+//   * setLibrary() / prepare() run on non-audio threads. requestReset() may be called from any thread.
 #pragma once
 
 #include "Library.h"
+#include "Path.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <array>
 #include <atomic>
@@ -32,10 +35,24 @@ public:
     // Installs a new folder. Safe to call from any non-audio thread, one caller at a time.
     void setLibrary (std::shared_ptr<const Library> library);
 
+    // Restarts the tuned station from the START position. Safe from any thread.
+    void requestReset() noexcept { resetFlag.store (true); }
+
     struct Params
     {
         float station     = 0.0f;    // 0..1, mapped across the stations in the folder
         float crossfadeMs = 25.0f;   // milliseconds
+        float startNorm   = 0.0f;    // 0..1 position in the file (quantised to 1024 steps)
+        float endNorm     = 1.0f;    // 0..1 position in the file (quantised to 1024 steps)
+        int   loopMode    = LoopForward;
+        bool  paused      = false;   // tape-style stop (speed slews to zero) and start
+        bool  radioStart  = true;    // true: every file keeps advancing; false: station restarts at START when tuned
+        bool  startImmediate = false; // true: START moves take effect at once instead of at the next Reset
+
+        // Radio clock source. Free-running by default; with hostSync the clock follows the DAW's sample position.
+        bool    hostSync    = false;
+        bool    hostPlaying = true;
+        int64_t hostSamples = 0;
     };
 
     // Audio thread. Writes numSamples of mono audio into out (overwrites it).
@@ -47,6 +64,10 @@ public:
     uint32_t getUnderrunCount() const noexcept     { return underruns.load(); }
     int64_t  getClockSamples() const noexcept      { return clockSamples.load(); }
     double   getClockSeconds() const noexcept      { return uiClockSeconds.load(); }
+    double   getPlayPosition() const noexcept      { return uiPlayFrac.load(); }  // 0..1 in the tuned file, -1 = none
+    double   getWindowLo() const noexcept          { return uiWinLo.load(); }     // 0..1
+    double   getWindowHi() const noexcept          { return uiWinHi.load(); }     // 0..1
+    bool     isWindowReversed() const noexcept     { return uiWinRev.load(); }
 
     // For tests only: jump the radio clock. Call while audio is not being processed.
     void setClockSamplesForTesting (int64_t samples) noexcept { clockSamples.store (samples); }
@@ -55,15 +76,36 @@ private:
     //==========================================================================
     static constexpr int kFifoFrames    = 1 << 17;   // frames of read-ahead per voice (mono float)
     static constexpr int kPrefillFrames = 8192;      // frames that must be buffered before a voice starts
-    static constexpr int kChunkFrames   = 8192;      // frames read from disk per request
+    static constexpr int kChunkFrames   = 8192;      // frames produced per stream-thread request
+    static constexpr int kCacheFrames   = 1 << 16;   // loop windows up to this long are cached by the stream thread
     static constexpr int kRenderChunk   = 256;       // audio-thread processing granularity
     static constexpr double kMaxStep    = 16.0;      // max file-rate / session-rate ratio supported
+    static constexpr double kFastFadeSeconds = 0.025;   // fade used for Reset, loop and window changes (never longer than the crossfade setting)
+    static constexpr double kPauseSlewSeconds = 0.3;    // tape-style stop/start time
+    static constexpr double kSettleSeconds    = 0.04;   // a moved End (or immediate Start) must hold still this long before it is used
 
     struct Table                      // numeric station data the audio thread may read
     {
         uint32_t id    = 0;
         int      count = 0;
         std::array<StationInfo, kMaxStationsPerBank> info {};
+    };
+
+    // Everything that decides what a voice plays. If it changes, the engine crossfades to a new voice.
+    struct Sig
+    {
+        int      station   = -1;
+        int      startStep = 0;
+        int      endStep   = 0;
+        int      loopMode  = LoopForward;
+        uint32_t epoch     = 0;       // bumped on Reset or a restart on station change
+
+        bool operator== (const Sig& o) const noexcept
+        {
+            return station == o.station && startStep == o.startStep && endStep == o.endStep
+                   && loopMode == o.loopMode && epoch == o.epoch;
+        }
+        bool operator!= (const Sig& o) const noexcept { return ! (*this == o); }
     };
 
     struct Voice
@@ -73,7 +115,11 @@ private:
         // ---- shared between audio thread and stream thread ----
         std::atomic<uint32_t> reqGen    { 0 };
         std::atomic<int>      reqStation { -1 };
-        std::atomic<int64_t>  reqStart  { 0 };
+        std::atomic<int64_t>  reqLo     { 0 };
+        std::atomic<int64_t>  reqHi     { 0 };
+        std::atomic<int>      reqMode   { LoopForward };
+        std::atomic<int>      reqRev    { 0 };
+        std::atomic<int64_t>  reqTau    { 0 };
         std::atomic<uint32_t> reqTable  { 0 };
         std::atomic<uint32_t> readyGen  { 0 };
         std::atomic<uint32_t> failedGen { 0 };
@@ -83,22 +129,29 @@ private:
         // ---- stream thread only ----
         std::unique_ptr<juce::AudioFormatReader> reader;
         uint32_t handledGen = 0;
-        int64_t  readPos    = 0;
         int64_t  fileLen    = 0;
         bool     streaming  = false;
+        PathCfg  scfg;
+        int64_t  spos   = 0;
+        bool     sback  = false;
+        bool     sended = false;
+        bool     cacheValid = false;
+        std::vector<float> cache;
 
         // ---- audio thread only ----
         enum class State { Idle, Loading, Playing };
         State    state   = State::Idle;
         uint32_t gen     = 0;
-        int      station = -1;
+        Sig      sig;
+        PathCfg  cfg;
         double   fileRate = 0.0;
         int64_t  numFrames = 0;
-        int64_t  seekStart = 0;
+        int64_t  tauStart = 0;
         double   step = 1.0, phase = 0.0;
         int64_t  consumed = 0;
         float    s0 = 0.0f, s1 = 0.0f;
         float    level = 0.0f, levelTarget = 0.0f, levelInc = 0.0f;
+        float    fadeInc = 0.0f;
     };
 
     class StreamThread;
@@ -107,16 +160,19 @@ private:
     const Table& acquireTable() noexcept;
     void invalidateAll() noexcept;
     void setIdle (Voice& v) noexcept;
-    void requestVoice (Voice& v, int station, const Table& t, int64_t clockAtChunkStart) noexcept;
+    void requestVoice (Voice& v, const Sig& sig, const Table& t, int64_t clock, float fadeInc) noexcept;
     int  allocVoice() noexcept;
-    void handleTargetChange (int desired, const Table& t, int64_t clockStart, float xfInc) noexcept;
-    void tryAlign (int voiceIndex, const Table& t, int64_t clockStart, float xfInc) noexcept;
-    void renderVoice (Voice& v, float* out, int n, const Table& t, int64_t clockStart) noexcept;
+    void handleTargetChange (Sig desired, const Table& t, int64_t clock, float xfInc, float fastInc) noexcept;
+    void tryAlign (int voiceIndex, const Table& t, int64_t clock) noexcept;
+    void renderVoice (Voice& v, float* out, int n, const Table& t, int64_t clock, const float* mul, double sumMul) noexcept;
     bool popFrames (Voice& v, float* dst, int num) noexcept;
-    static double expectedFrame (double fileRate, int64_t numFrames, int64_t clock, double sessionRate) noexcept;
+    double tauFor (int station, int64_t clock, double fileRate) const noexcept;
+    void publishStatus (const Table& t, int64_t clock, int desiredStation) noexcept;
 
-    // stream-thread helper
+    // stream-thread helpers
     bool serviceVoice (Voice& v);
+    void fetchFrames (Voice& v, float* dst, int64_t start, int count);
+    void generate (Voice& v, int num);
 
     //==========================================================================
     std::array<Voice, kNumVoices> voices;
@@ -139,15 +195,31 @@ private:
     double   sessionRate = 44100.0;
     uint32_t knownTableId = 0;
     int      current = -1, pending = -1;
-    int      committedStation = -1, pendingStation = -1;
-    std::array<bool, kMaxStationsPerBank> badStation {};
+    Sig      committedSig, pendingSig;
+    int      lastDesiredStation = -2;
+    std::array<bool, kMaxStationsPerBank>     badStation {};
+    std::array<double, kMaxStationsPerBank>   refClock {};   // radio-clock sample at which each station's path began
+    std::array<uint32_t, kMaxStationsPerBank> epochOf {};
     std::vector<float> scratch;
 
+    bool   settingsInit = false;
+    int    latchedStart = 0, appliedEnd = 0;
+    int    seenStart = 0, seenEnd = 0;
+    int64_t startStable = 0, endStable = 0;
+
+    double speedMul = 1.0;        // 1 = playing, 0 = paused (tape-style slew)
+    std::array<float, kRenderChunk> mulBuf {};
+
+    std::atomic<bool>     resetFlag { false };
     std::atomic<int64_t>  clockSamples { 0 };
     std::atomic<int>      uiStation { -1 };
     std::atomic<int>      uiCount   { 0 };
     std::atomic<uint32_t> underruns { 0 };
     std::atomic<double>   uiClockSeconds { 0.0 };
+    std::atomic<double>   uiPlayFrac { -1.0 };
+    std::atomic<double>   uiWinLo { 0.0 };
+    std::atomic<double>   uiWinHi { 1.0 };
+    std::atomic<bool>     uiWinRev { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RadioEngine)
 };

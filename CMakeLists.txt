@@ -15,6 +15,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(RM_BUILD_TESTS "Build the engine test program" ON)
+option(RM_BUILD_SNAPSHOT "Build the developer tool that renders the editor to PNG" OFF)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -28,7 +29,8 @@ set(RM_ENGINE_SOURCES
     Source/Engine/Library.cpp
     Source/Engine/Library.h
     Source/Engine/RadioEngine.cpp
-    Source/Engine/RadioEngine.h)
+    Source/Engine/RadioEngine.h
+    Source/Engine/Path.h)
 
 #------------------------------------------------------------------------------
 # The plugin (AU instrument + VST3)
@@ -95,6 +97,36 @@ if(RM_BUILD_TESTS)
     target_link_libraries(RadioEngineTest
         PRIVATE
             juce::juce_audio_formats
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags)
+endif()
+
+#------------------------------------------------------------------------------
+# Developer tool: renders the editor to PNG files without a screen (off by default, not used by CI).
+if(RM_BUILD_SNAPSHOT)
+    juce_add_console_app(EditorSnapshot
+        PRODUCT_NAME "EditorSnapshot"
+        NEEDS_WEB_BROWSER FALSE
+        NEEDS_CURL FALSE)
+
+    target_sources(EditorSnapshot PRIVATE
+        ${RM_ENGINE_SOURCES}
+        Source/Plugin/PluginProcessor.cpp
+        Source/Plugin/PluginEditor.cpp
+        tests/EditorSnapshot.cpp)
+
+    target_include_directories(EditorSnapshot PRIVATE Source)
+
+    target_compile_definitions(EditorSnapshot PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0)
+
+    target_link_libraries(EditorSnapshot
+        PRIVATE
+            juce::juce_audio_processors
+            juce::juce_audio_formats
+            juce::juce_gui_basics
         PUBLIC
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)
