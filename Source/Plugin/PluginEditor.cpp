@@ -497,9 +497,8 @@ namespace
     }
 }
 
-RadioMusicEditor::RadioMusicEditor (RadioMusicProcessor& p)
-    : AudioProcessorEditor (&p),
-      processor (p),
+RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
+    : processor (p),
       dial (p),
       startKnob ("START",     [] (double v) { return formatPercent (v, rm::kStartDivider); }),
       endKnob ("END",         [] (double v) { return formatPercent (v, 1); }),
@@ -528,7 +527,7 @@ RadioMusicEditor::RadioMusicEditor (RadioMusicProcessor& p)
       gritAttach       (p.apvts, "gritMode",       gritButton),
       speedModeWatcher (*p.apvts.getParameter ("speedMode"), [this] (float v) { applySpeedMode (juce::jlimit (0, 2, (int) std::lround (v))); })
 {
-    setSize (940, 560);
+    setSize (RadioMusicEditor::kBaseWidth, RadioMusicEditor::kBaseHeight);
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &dial, &startKnob, &endKnob, &crossfadeKnob, &volumeKnob, &resetButton, &pauseButton,
@@ -543,6 +542,7 @@ RadioMusicEditor::RadioMusicEditor (RadioMusicProcessor& p)
 
     speedModeWatcher.sendInitialUpdate();
 
+    quantiseButton.onStateChange = [this] { updateSnap(); };
     resetButton.onClick  = [this] { processor.triggerReset(); resetButton.flash(); };
     folderButton.onClick = [this] { chooseFolder(); };
 
@@ -561,7 +561,7 @@ RadioMusicEditor::RadioMusicEditor (RadioMusicProcessor& p)
         return "Playback speed as a percent of original (100% = normal, 0% = stopped, negative plays backwards, up to 400%). Only the tuned station changes speed; other stations keep running at normal speed. Double-click for 100%.";
     });
     addHint (speedModeSelector, "TAPE: smooth speed control, through zero into reverse. NOTES: pitch in semitones. '90s: not available yet (plays at original speed).");
-    addHint (quantiseButton,   "NOTES mode: round the pitch to whole semitones (equal temperament). Off gives continuous pitch.");
+    addHint (quantiseButton,   "Only works in NOTES mode. On: the pitch knob moves in whole semitones (equal temperament). Off: continuous pitch, so you can slide between notes.");
     addHint (gritButton,       "Low-fi sound: 8-bit, about 20 kHz, no smoothing between samples, softened by a post-DAC filter. Off is clean cubic interpolation.");
     addHint (radioStartButton, "ON: every file keeps playing in the background, like tuning a radio. OFF: a station restarts from START when you tune to it.");
     addHint (immediateButton,  "ON: moving START takes effect straight away instead of waiting for RESET.");
@@ -572,22 +572,22 @@ RadioMusicEditor::RadioMusicEditor (RadioMusicProcessor& p)
     startTimerHz (30);
 }
 
-RadioMusicEditor::~RadioMusicEditor()
+RadioMusicPanel::~RadioMusicPanel()
 {
     stopTimer();
 }
 
-void RadioMusicEditor::addHint (juce::Component& c, const juce::String& text)
+void RadioMusicPanel::addHint (juce::Component& c, const juce::String& text)
 {
     hints[&c] = [text] { return text; };
 }
 
-void RadioMusicEditor::addHint (juce::Component& c, std::function<juce::String()> text)
+void RadioMusicPanel::addHint (juce::Component& c, std::function<juce::String()> text)
 {
     hints[&c] = std::move (text);
 }
 
-void RadioMusicEditor::applySpeedMode (int mode)
+void RadioMusicPanel::applySpeedMode (int mode)
 {
     speedMode = mode;
     speedAttach.reset();
@@ -614,10 +614,16 @@ void RadioMusicEditor::applySpeedMode (int mode)
 
     speedKnob.setEnabled (mode != 2);
     quantiseButton.setEnabled (mode == 1);
+    updateSnap();
     repaint();
 }
 
-void RadioMusicEditor::mouseEnter (const juce::MouseEvent& e)
+void RadioMusicPanel::updateSnap()
+{
+    speedKnob.setSnapToWholeNumbers (speedMode == 1 && quantiseButton.getToggleState());
+}
+
+void RadioMusicPanel::mouseEnter (const juce::MouseEvent& e)
 {
     auto it = hints.find (e.eventComponent);
     if (it != hints.end())
@@ -631,7 +637,7 @@ void RadioMusicEditor::mouseEnter (const juce::MouseEvent& e)
     }
 }
 
-void RadioMusicEditor::mouseExit (const juce::MouseEvent& e)
+void RadioMusicPanel::mouseExit (const juce::MouseEvent& e)
 {
     auto it = hints.find (e.eventComponent);
     if (it != hints.end() && currentHint == it->second())
@@ -641,7 +647,7 @@ void RadioMusicEditor::mouseExit (const juce::MouseEvent& e)
     }
 }
 
-void RadioMusicEditor::resized()
+void RadioMusicPanel::resized()
 {
     using juce::Rectangle;
 
@@ -671,7 +677,7 @@ void RadioMusicEditor::resized()
     folderButton.setBounds (Rectangle<int> (24, 514, 120, 26));
 }
 
-void RadioMusicEditor::paint (juce::Graphics& g)
+void RadioMusicPanel::paint (juce::Graphics& g)
 {
     using namespace rmui::colours;
     g.fillAll (bg);
@@ -743,9 +749,9 @@ void RadioMusicEditor::paint (juce::Graphics& g)
 
     // hint line
     g.setColour (currentHint.isEmpty() ? dim.withAlpha (0.55f) : cream.withAlpha (0.9f));
-    g.setFont (rmui::uiFont (11.0f));
+    g.setFont (rmui::uiFont (14.5f));
     g.drawFittedText (currentHint.isEmpty() ? juce::String ("Hover over a control to see what it does.") : currentHint,
-                      juce::Rectangle<int> (28, 470, getWidth() - 56, 32), juce::Justification::centredLeft, 2);
+                      juce::Rectangle<int> (28, 466, getWidth() - 56, 44), juce::Justification::centredLeft, 2, 0.9f);
 
     // folder path
     {
@@ -766,7 +772,7 @@ void RadioMusicEditor::paint (juce::Graphics& g)
                       juce::Rectangle<int> (520, 508, getWidth() - 24 - 520, 40), juce::Justification::centredRight, 4);
 }
 
-void RadioMusicEditor::chooseFolder()
+void RadioMusicPanel::chooseFolder()
 {
     const auto start = processor.getSampleFolder() != juce::File()
                            ? processor.getSampleFolder()
@@ -774,7 +780,7 @@ void RadioMusicEditor::chooseFolder()
 
     chooser = std::make_unique<juce::FileChooser> ("Choose the folder of audio files (WAV or AIFF)", start);
 
-    juce::Component::SafePointer<RadioMusicEditor> safe (this);
+    juce::Component::SafePointer<RadioMusicPanel> safe (this);
 
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
                           [safe] (const juce::FileChooser& fc)
@@ -788,7 +794,7 @@ void RadioMusicEditor::chooseFolder()
                           });
 }
 
-void RadioMusicEditor::timerCallback()
+void RadioMusicPanel::timerCallback()
 {
     const float peak = processor.getOutputPeak();
     meterLevel = std::max (peak, meterLevel * 0.86f);
@@ -797,4 +803,34 @@ void RadioMusicEditor::timerCallback()
     dial.repaint();
     repaint (juce::Rectangle<int> (0, 0, getWidth(), 66));
     repaint (juce::Rectangle<int> (0, 506, getWidth(), 54));
+}
+
+
+//==============================================================================
+RadioMusicEditor::RadioMusicEditor (RadioMusicProcessor& p)
+    : AudioProcessorEditor (&p), processor (p), panel (p)
+{
+    addAndMakeVisible (panel);
+
+    constrainer.setFixedAspectRatio ((double) kBaseWidth / (double) kBaseHeight);
+    constrainer.setSizeLimits (kMinWidth, kMinWidth * kBaseHeight / kBaseWidth, kMaxWidth, kMaxWidth * kBaseHeight / kBaseWidth);
+    setConstrainer (&constrainer);
+    setResizable (true, true);
+
+    const int w = juce::jlimit (kMinWidth, kMaxWidth, (int) processor.apvts.state.getProperty ("editorWidth", kBaseWidth));
+    setSize (w, (int) std::lround ((double) w * kBaseHeight / kBaseWidth));
+}
+
+void RadioMusicEditor::paint (juce::Graphics& g)
+{
+    g.fillAll (rmui::colours::bg);
+}
+
+void RadioMusicEditor::resized()
+{
+    panel.setBounds (0, 0, kBaseWidth, kBaseHeight);
+    panel.setTransform (juce::AffineTransform::scale ((float) getWidth() / (float) kBaseWidth));
+
+    if ((int) processor.apvts.state.getProperty ("editorWidth", kBaseWidth) != getWidth())
+        processor.apvts.state.setProperty ("editorWidth", getWidth(), nullptr);
 }

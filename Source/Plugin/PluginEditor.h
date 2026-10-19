@@ -19,7 +19,12 @@ public:
     void setCaption (const juce::String& t) { caption = t; repaint(); }
     void setFormatter (std::function<juce::String (double)> f) { format = std::move (f); repaint(); }
 
+    // When on, dragging the knob moves in whole steps (used for semitones).
+    void setSnapToWholeNumbers (bool on) { snapWhole = on; }
+    double snapValue (double attempted, DragMode) override { return snapWhole ? std::round (attempted) : attempted; }
+
 private:
+    bool snapWhole = false;
     juce::String caption;
     std::function<juce::String (double)> format;
 };
@@ -80,12 +85,13 @@ private:
 } // namespace rmui
 
 //==============================================================================
-class RadioMusicEditor : public juce::AudioProcessorEditor,
-                         private juce::Timer
+// The whole interface, laid out on a fixed 940 x 560 canvas. The editor below scales it to the window.
+class RadioMusicPanel : public juce::Component,
+                        private juce::Timer
 {
 public:
-    explicit RadioMusicEditor (RadioMusicProcessor&);
-    ~RadioMusicEditor() override;
+    explicit RadioMusicPanel (RadioMusicProcessor&);
+    ~RadioMusicPanel() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -98,6 +104,7 @@ private:
     void addHint (juce::Component& c, const juce::String& text);
     void addHint (juce::Component& c, std::function<juce::String()> text);
     void applySpeedMode (int mode);
+    void updateSnap();
 
     RadioMusicProcessor& processor;
 
@@ -118,6 +125,26 @@ private:
     std::map<juce::Component*, std::function<juce::String()>> hints;
     juce::String currentHint;
     float meterLevel = 0.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RadioMusicPanel)
+};
+
+//==============================================================================
+// The plug-in window: resizable, keeps the panel's proportions, remembers its size with the project.
+class RadioMusicEditor : public juce::AudioProcessorEditor
+{
+public:
+    static constexpr int kBaseWidth = 940, kBaseHeight = 560;
+    static constexpr int kMinWidth = 705, kMaxWidth = 1880;
+
+    explicit RadioMusicEditor (RadioMusicProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+private:
+    RadioMusicProcessor& processor;
+    RadioMusicPanel panel;
+    juce::ComponentBoundsConstrainer constrainer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RadioMusicEditor)
 };

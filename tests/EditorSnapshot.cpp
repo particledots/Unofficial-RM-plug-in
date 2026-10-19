@@ -117,6 +117,22 @@ int main (int argc, char** argv)
     pump (proc, 0.3);
     snap (proc, outDir.getChildFile ("4_90s.png"));
 
+    // scaled window (1.5x): panel must fill it
+    {
+        setParam (proc, "speedMode", 1.0f);
+        std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
+        ed->setSize (1410, 840);
+        ed->setVisible (true);
+        juce::Thread::sleep (50);
+        auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+        juce::PNGImageFormat fmt;
+        auto f = outDir.getChildFile ("5_scaled.png");
+        f.deleteFile();
+        juce::FileOutputStream out (f);
+        fmt.writeImageToStream (img, out);
+        std::cout << "wrote " << f.getFullPathName() << " (" << img.getWidth() << "x" << img.getHeight() << ")\n";
+    }
+
     root.deleteRecursively();
     return 0;
 }
