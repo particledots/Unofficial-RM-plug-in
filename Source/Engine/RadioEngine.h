@@ -51,6 +51,11 @@ public:
         bool  radioStart  = true;    // true: every file keeps advancing; false: station restarts at START when tuned
         bool  startImmediate = false; // true: START moves take effect at once instead of at the next Reset
 
+        // Banks and settings.txt (milestone 4).
+        int   bank        = 0;           // 0..15
+        int   startDivider = kStartDivider;   // START is quantised to 1024 / startDivider steps (documented startCVDivider)
+        bool  reselectOnTune = false;    // documented reselectSubdirOnStationChange: subfolders pick a new file when tuned to
+
         // Speed (affects the tuned station only; background stations always advance at 1x).
         int   speedMode   = SpeedTape;   // SpeedTape, SpeedNotes or Speed90s (90s: plays at original speed for now)
         float speedTape   = 100.0f;      // percent of original speed, -400..+400 (negative plays backwards)
@@ -68,8 +73,9 @@ public:
     void process (float* out, int numSamples, const Params& params) noexcept;
 
     // Read-only status for the user interface (any thread).
-    int      getDisplayedStation() const noexcept  { return uiStation.load(); }   // -1 = none
-    int      getNumStations() const noexcept       { return uiCount.load(); }
+    int      getDisplayedStation() const noexcept  { return uiStation.load(); }   // slot on the dial in this bank, -1 = none
+    int      getDisplayedFile() const noexcept     { return uiFile.load(); }      // index into Library::stations of the playing file, -1 = none
+    int      getNumStations() const noexcept       { return uiCount.load(); }     // slots in this bank
     uint32_t getUnderrunCount() const noexcept     { return underruns.load(); }
     int64_t  getClockSamples() const noexcept      { return clockSamples.load(); }
     double   getClockSeconds() const noexcept      { return uiClockSeconds.load(); }
@@ -98,11 +104,23 @@ private:
     static constexpr double kGritFilterHz = 8000.0;     // grit mode post-DAC filter
     static constexpr double kSettleSeconds    = 0.04;   // a moved End (or immediate Start) must hold still this long before it is used
 
+    static constexpr int kMaxFiles = kMaxFilesTotal;
+
+    struct SlotInfo
+    {
+        int firstFile = 0;
+        int numFiles  = 0;
+        int mode      = SlotFile;
+    };
+
     struct Table                      // numeric station data the audio thread may read
     {
-        uint32_t id    = 0;
-        int      count = 0;
-        std::array<StationInfo, kMaxStationsPerBank> info {};
+        uint32_t id = 0;
+        std::array<int, kNumBanks> bankFirst {};     // first slot of each bank
+        std::array<int, kNumBanks> bankCount {};     // slots in each bank (0 = the bank does not exist)
+        std::array<SlotInfo, kMaxFiles>    slots {};
+        std::array<StationInfo, kMaxFiles> info {};  // per file
+        std::array<uint8_t, kMaxFiles>     skip {};  // per file
     };
 
     // Everything that decides what a voice plays. If it changes, the engine crossfades to a new voice.
@@ -184,7 +202,8 @@ private:
                       const float* eff, double sumEff, const float* gain, bool cubic) noexcept;
     bool popFrames (Voice& v, float* dst, int num) noexcept;
     double tauFor (int station, int64_t clock, double fileRate) const noexcept;
-    void publishStatus (const Table& t, int64_t clock, int desiredStation) noexcept;
+    void publishStatus (const Table& t, int64_t clock, int desiredSlot, int desiredFile, int slotCount) noexcept;
+    void reselect (int globalSlot, const Table& t) noexcept;
 
     // stream-thread helpers
     bool serviceVoice (Voice& v);
@@ -213,10 +232,13 @@ private:
     uint32_t knownTableId = 0;
     int      current = -1, pending = -1;
     Sig      committedSig, pendingSig;
-    int      lastDesiredStation = -2;
-    std::array<bool, kMaxStationsPerBank>     badStation {};
-    std::array<double, kMaxStationsPerBank>   refClock {};   // radio-clock sample at which each station's path began
-    std::array<uint32_t, kMaxStationsPerBank> epochOf {};
+    int      lastDesiredSlot = -2;                 // global slot index (bank first slot + dial position)
+    std::array<bool, kMaxFiles>     badStation {};   // per file
+    std::array<double, kMaxFiles>   refClock {};     // per file: radio-clock sample at which its path began
+    std::array<uint32_t, kMaxFiles> epochOf {};
+    std::array<int, kMaxFiles>      slotCur {};      // per slot: which of its files is selected
+    std::array<int, kMaxFiles>      skipLeft {};     // per slot: resets still to be ignored (skipN)
+    uint32_t rngState = 0x9e3779b9u;
     std::vector<float> scratch;
 
     bool   settingsInit = false;
@@ -236,6 +258,7 @@ private:
     std::atomic<bool>     resetFlag { false };
     std::atomic<int64_t>  clockSamples { 0 };
     std::atomic<int>      uiStation { -1 };
+    std::atomic<int>      uiFile    { -1 };
     std::atomic<int>      uiCount   { 0 };
     std::atomic<uint32_t> underruns { 0 };
     std::atomic<double>   uiClockSeconds { 0.0 };

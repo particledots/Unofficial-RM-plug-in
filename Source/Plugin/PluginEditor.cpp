@@ -323,7 +323,9 @@ void DialDisplay::paint (juce::Graphics& g)
     const auto folder = processor.getSampleFolder();
     const auto lib = processor.getLibrary();
     const int count = engine.getNumStations();
-    const int idx = engine.getDisplayedStation();
+    const int idx = engine.getDisplayedStation();       // position on the dial
+    const int fileIdx = engine.getDisplayedFile();      // index of the file that is playing
+    const int bankNumber = juce::jlimit (0, rm::kNumBanks - 1, (int) std::lround (processor.apvts.getRawParameterValue ("bank")->load()));
     const bool haveStations = lib != nullptr && ! lib->stations.empty() && count > 0;
 
     auto bounds = getLocalBounds().toFloat();
@@ -338,14 +340,26 @@ void DialDisplay::paint (juce::Graphics& g)
     auto top = bounds.reduced (28.0f, 0.0f).withTrimmedTop (14.0f).withHeight (46.0f);
     juce::String name, number;
     if (folder == juce::File())
-        name = "Choose a folder of WAV or AIFF files";
+        name = "Choose a folder of WAV, AIFF or RAW files";
     else if (lib == nullptr)
         name = "Scanning...";
     else if (lib->stations.empty())
-        name = "No playable WAV or AIFF files in that folder";
-    else if (idx >= 0 && idx < (int) lib->stations.size())
+        name = "No playable audio files in that folder";
+    else if (lib->findBank (bankNumber) == nullptr)
+        name = "No bank " + juce::String (bankNumber) + " in that folder";
+    else if (count < 1)
+        name = "Bank " + juce::String (bankNumber) + " has no playable audio files";
+    else if (fileIdx >= 0 && fileIdx < (int) lib->stations.size())
     {
-        name = lib->stations[(size_t) idx].file.getFileName();
+        name = lib->stations[(size_t) fileIdx].file.getFileName();
+
+        for (const auto& sl : lib->slots)             // a subfolder shows as "folder / file"
+            if (sl.mode != rm::SlotFile && fileIdx >= sl.firstFile && fileIdx < sl.firstFile + sl.numFiles)
+            {
+                name = sl.name + "  /  " + name;
+                break;
+            }
+
         number = juce::String (idx + 1).paddedLeft ('0', 2) + " / " + juce::String (count).paddedLeft ('0', 2);
     }
 
@@ -454,9 +468,9 @@ void DialDisplay::paint (juce::Graphics& g)
         g.setColour (cream);
         g.drawLine (x, bar.getY() - 3.0f, x, bar.getBottom() + 3.0f, 2.0f);
 
-        if (lib != nullptr && idx >= 0 && idx < (int) lib->stations.size())
+        if (lib != nullptr && fileIdx >= 0 && fileIdx < (int) lib->stations.size())
         {
-            const auto& info = lib->stations[(size_t) idx].info;
+            const auto& info = lib->stations[(size_t) fileIdx].info;
             if (info.sampleRate > 0.0)
                 posText = formatTime (pos * (double) info.numFrames / info.sampleRate) + " / "
                           + formatTime ((double) info.numFrames / info.sampleRate);
@@ -470,6 +484,66 @@ void DialDisplay::paint (juce::Graphics& g)
     g.setFont (monoFont (10.0f));
     g.drawText (posText, juce::Rectangle<float> (bar.getRight() - 200.0f, bar.getBottom() + 2.0f, 200.0f, 14.0f),
                 juce::Justification::centredRight, false);
+}
+
+//==============================================================================
+BankStepper::BankStepper (RadioMusicProcessor& p)
+    : processor (p),
+      attachment (*p.apvts.getParameter ("bank"), [this] (float v) { bank = juce::jlimit (0, rm::kNumBanks - 1, (int) std::lround (v)); repaint(); })
+{
+    attachment.sendInitialUpdate();
+}
+
+void BankStepper::step (int delta)
+{
+    const int next = juce::jlimit (0, rm::kNumBanks - 1, bank + delta);
+    if (next != bank)
+        attachment.setValueAsCompleteGesture ((float) next);
+}
+
+void BankStepper::mouseDown (const juce::MouseEvent& e)
+{
+    step (e.x < getWidth() / 2 ? -1 : 1);
+}
+
+void BankStepper::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
+{
+    const float delta = std::fabs (w.deltaY) > 0.0001f ? w.deltaY : w.deltaX;
+    if (std::fabs (delta) > 0.0001f)
+        step ((delta > 0.0f ? 1 : -1) * (w.isReversed ? -1 : 1));
+}
+
+void BankStepper::paint (juce::Graphics& g)
+{
+    using namespace colours;
+    const auto lib = processor.getLibrary();
+    const bool exists = lib != nullptr && lib->findBank (bank) != nullptr && (lib->hasNumberedBanks || bank == 0);
+
+    auto b = getLocalBounds().toFloat();
+    g.setColour (glassBot);
+    g.fillRoundedRectangle (b, 8.0f);
+    g.setColour (panelEdge);
+    g.drawRoundedRectangle (b.reduced (0.5f), 8.0f, 1.2f);
+
+    // arrows
+    g.setColour (bank > 0 ? amber : dim.withAlpha (0.4f));
+    juce::Path l;
+    l.addTriangle (14.0f, b.getCentreY(), 22.0f, b.getCentreY() - 6.0f, 22.0f, b.getCentreY() + 6.0f);
+    g.fillPath (l);
+    g.setColour (bank < rm::kNumBanks - 1 ? amber : dim.withAlpha (0.4f));
+    juce::Path r;
+    r.addTriangle (b.getRight() - 14.0f, b.getCentreY(), b.getRight() - 22.0f, b.getCentreY() - 6.0f, b.getRight() - 22.0f, b.getCentreY() + 6.0f);
+    g.fillPath (r);
+
+    g.setColour (dim);
+    g.setFont (uiFont (9.0f, true));
+    g.drawText ("BANK", b.withTrimmedLeft (28.0f).withTrimmedRight (28.0f).withTrimmedBottom (b.getHeight() * 0.55f),
+                juce::Justification::centred, false);
+
+    g.setColour (exists ? amber : dim);
+    g.setFont (monoFont (20.0f));
+    g.drawText (juce::String (bank).paddedLeft ('0', 2), b.withTrimmedLeft (28.0f).withTrimmedRight (28.0f).withTrimmedTop (b.getHeight() * 0.3f),
+                juce::Justification::centred, false);
 }
 } // namespace rmui
 
@@ -500,7 +574,8 @@ namespace
 RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     : processor (p),
       dial (p),
-      startKnob ("START",     [] (double v) { return formatPercent (v, rm::kStartDivider); }),
+      bankStepper (p),
+      startKnob ("START",     [&p] (double v) { return formatPercent (v, p.getStartDivider()); }),
       endKnob ("END",         [] (double v) { return formatPercent (v, 1); }),
       crossfadeKnob ("CROSSFADE", [] (double v) { return formatCrossfade (v); }),
       volumeKnob ("VOLUME",   [] (double v) { return formatVolume (v); }),
@@ -532,7 +607,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &dial, &startKnob, &endKnob, &crossfadeKnob, &volumeKnob, &resetButton, &pauseButton,
              &hostSyncButton, &radioStartButton, &immediateButton, &folderButton, &loopSelector,
-             &speedKnob, &speedModeSelector, &quantiseButton, &gritButton })
+             &speedKnob, &speedModeSelector, &quantiseButton, &gritButton, &bankStepper })
         addAndMakeVisible (c);
 
     startKnob.setDoubleClickReturnValue (true, 0.0);
@@ -566,7 +641,8 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     addHint (radioStartButton, "ON: every file keeps playing in the background, like tuning a radio. OFF: a station restarts from START when you tune to it.");
     addHint (immediateButton,  "ON: moving START takes effect straight away instead of waiting for RESET.");
     addHint (hostSyncButton,   "ON: the radio clock follows the DAW's play position, so bounces repeat exactly. Silent while the transport is stopped.");
-    addHint (folderButton,     "Choose the folder of WAV or AIFF files to play.");
+    addHint (folderButton,     "Choose the folder to play. Audio files (WAV, AIFF, RAW) in it are the stations. Folders named 0 to 15 (like \"05 shortwave\") are banks; subfolders pick one file at a time.");
+    addHint (bankStepper,      "Bank 0 to 15: root folders whose names start with a number. Click the left or right side, or use the mouse wheel. Without numbered folders, the whole folder is bank 0.");
 
     addMouseListener (this, true);
     startTimerHz (30);
@@ -652,6 +728,7 @@ void RadioMusicPanel::resized()
     using juce::Rectangle;
 
     dial.setBounds (24, 70, getWidth() - 48, 212);
+    bankStepper.setBounds (330, 16, 118, 40);
 
     // controls panel: y 294..464
     const int ky = 344, kw = 88, kh = 112;
@@ -712,7 +789,7 @@ void RadioMusicPanel::paint (juce::Graphics& g)
 
     // output meter
     {
-        const auto m = juce::Rectangle<float> ((float) getWidth() - 24.0f - 216.0f - 40.0f - 240.0f, 28.0f, 240.0f, 10.0f);
+        const auto m = juce::Rectangle<float> ((float) getWidth() - 24.0f - 216.0f - 40.0f - 200.0f, 28.0f, 200.0f, 10.0f);
         g.setColour (glassBot);
         g.fillRoundedRectangle (m, 5.0f);
         const float dB = meterLevel > 0.00001f ? juce::Decibels::gainToDecibels (meterLevel) : -90.0f;

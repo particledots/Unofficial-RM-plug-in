@@ -82,6 +82,24 @@ private:
     float stationValue = 0.0f;
     bool dragging = false;
 };
+
+//==============================================================================
+// Bank selector: "BANK 05" with click left / right (or the mouse wheel) to change bank.
+class BankStepper : public juce::Component
+{
+public:
+    explicit BankStepper (RadioMusicProcessor& p);
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+private:
+    void step (int delta);
+
+    RadioMusicProcessor& processor;
+    juce::ParameterAttachment attachment;
+    int bank = 0;
+};
 } // namespace rmui
 
 //==============================================================================
@@ -109,6 +127,7 @@ private:
     RadioMusicProcessor& processor;
 
     rmui::DialDisplay dial;
+    rmui::BankStepper bankStepper;
     rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob, speedKnob;
     rmui::RmButton resetButton, pauseButton, hostSyncButton, radioStartButton, immediateButton, folderButton;
     rmui::RmButton quantiseButton, gritButton;

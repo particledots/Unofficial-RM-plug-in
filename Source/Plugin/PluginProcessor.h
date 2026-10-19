@@ -32,7 +32,8 @@ private:
 };
 
 //==============================================================================
-class RadioMusicProcessor : public juce::AudioProcessor
+class RadioMusicProcessor : public juce::AudioProcessor,
+                            private juce::Timer
 {
 public:
     RadioMusicProcessor();
@@ -69,6 +70,9 @@ public:
 
     rm::RadioEngine& getEngine() { return engine; }
 
+    // settings.txt values that have no knob: they always follow the files on disk.
+    int  getStartDivider() const noexcept { return startDividerSetting.load(); }
+
     // Restarts the tuned station from START (the Reset button). Safe from the message thread.
     void triggerReset() { engine.requestReset(); }
 
@@ -80,6 +84,10 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void libraryReady (std::shared_ptr<const rm::Library> lib);
+    void timerCallback() override;
+    void applyBankSettings (const rm::Library& lib, int bankNumber);
+    void updateRuntimeSettings (const rm::Library* lib, int bankNumber);
+    void setParameterValue (const char* id, float realValue);
 
     rm::RadioEngine engine;
 
@@ -102,6 +110,13 @@ private:
     std::atomic<float>* speedNotesParam = nullptr;
     std::atomic<float>* quantiseParam  = nullptr;
     std::atomic<float>* gritParam      = nullptr;
+    std::atomic<float>* bankParam      = nullptr;
+
+    std::atomic<int>  startDividerSetting { rm::kStartDivider };   // startCVDivider from settings.txt
+    std::atomic<bool> reselectSetting { false };                    // reselectSubdirOnStationChange from settings.txt
+    std::atomic<bool> libraryChanged { false };                     // a new library arrived (scanner thread -> message thread)
+    std::atomic<bool> applyOnReady { false };                       // the user chose a folder: apply its settings.txt when it is ready
+    int lastBank = 0;                                               // message thread only
 
     bool prevReset = false;
     std::atomic<float> outputPeak { 0.0f };

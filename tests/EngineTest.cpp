@@ -11,6 +11,7 @@
 //   * (milestone 2) loop window, reverse, ping-pong, loop off, Reset, Start latching, radio start off,
 //     Pause, and host sync all follow the documented behaviour.
 #include "Engine/RadioEngine.h"
+#include "Engine/LibraryRules.h"
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -901,7 +902,211 @@ static void testGritDC (const juce::File& dir)
     CHECK (lo > 0.49f && hi < 0.51f, "DC 0.5 comes out within 8-bit accuracy");
 }
 
-int main()
+
+//==============================================================================
+// Milestone 4: banks, subfolders, .raw, skipN, settings.txt
+
+static void writeRawDC (const juce::File& file, double seconds, float value)
+{
+    juce::MemoryBlock mb;
+    const int64_t n = (int64_t) (seconds * 44100.0);
+    mb.setSize ((size_t) n * 2);
+    const int16_t v = (int16_t) std::lround (value * 32768.0f);
+    for (int64_t i = 0; i < n; ++i)
+    {
+        mb[(size_t) i * 2]     = (char) (v & 0xff);          // little-endian
+        mb[(size_t) i * 2 + 1] = (char) ((v >> 8) & 0xff);
+    }
+    file.replaceWithData (mb.getData(), mb.getSize());
+}
+
+static void testRules()
+{
+    std::cout << "\n=== M4 naming and settings rules ===\n";
+    CHECK (parseBankNumber ("0") == 0 && parseBankNumber ("05 shortwave") == 5 && parseBankNumber ("15 - Koto plucks") == 15,
+           "bank numbers: 0, 05 shortwave, 15 - Koto plucks");
+    CHECK (parseBankNumber ("16 too high") == -1 && parseBankNumber ("shortwave") == -1 && parseBankNumber ("2024 field") == -1,
+           "not banks: 16, no number, 2024");
+
+    CHECK (parseSkipCount ("loop skip2") == 2 && parseSkipCount ("skip1") == 1 && parseSkipCount ("Fooskip12") == 12 && parseSkipCount ("x SKIP255") == 255,
+           "skipN found (1, 2, 12, 255; letter case ignored)");
+    CHECK (parseSkipCount ("skip0") == 0 && parseSkipCount ("skip256") == 0 && parseSkipCount ("skip") == 0 && parseSkipCount ("kip3") == 0 && parseSkipCount ("a skip300") == 0,
+           "skipN rejected (0, 256, no number, wrong word, 300)");
+
+    CHECK (endsWithNext ("seq next") && endsWithNext ("Next") && ! endsWithNext ("next up") && ! endsWithNext ("random"),
+           "subfolder 'next' rule");
+
+    const auto s = parseSettings ("  Cross Fade Time = 100   # ten\n"
+                                  "LOOPMODE=2\n"
+                                  "# whole line comment\n"
+                                  "pitchKnobMin = -12\n"
+                                  "bad line\n"
+                                  "novalue =\n"
+                                  "frac = 1.5\n"
+                                  "tunerMode\t=\t1\r\n");
+    CHECK (settingOr (s, "crossfadetime", -1) == 100, "settings: whitespace inside names ignored, comment stripped");
+    CHECK (settingOr (s, "loopMode", -1) == 2, "settings: names are not case-sensitive");
+    CHECK (settingOr (s, "pitchKnobMin", 0) == -12, "settings: negative values");
+    CHECK (settingOr (s, "tunerMode", -1) == 1, "settings: tabs and CRLF");
+    CHECK (! hasSetting (s, "novalue") && ! hasSetting (s, "frac") && s.size() == 4, "settings: malformed lines are skipped");
+
+    const auto m = mergeSettings (parseSettings ("a = 1\nb = 2"), parseSettings ("b = 5\nc = 3"));
+    CHECK (settingOr (m, "a", -1) == 1 && settingOr (m, "b", -1) == 5 && settingOr (m, "c", -1) == 3, "settings: bank file overrides, the rest is inherited");
+
+    CHECK (quantiseStep (0.3f, 8) == 304 && quantiseStep (0.5f, 1) == 512 && quantiseStep (1.0f, 2) == 1024, "START quantised by the divider");
+}
+
+// Plays the tuned station for a while and returns the mean of the last block.
+static float levelAfter (Runner& r, RadioEngine::Params& p, double seconds)
+{
+    float last = 0.0f;
+    r.run (seconds, p, [&] (int64_t, const float* o, int n)
+    {
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) sum += o[i];
+        last = (float) (sum / n);
+    });
+    return last;
+}
+
+static void testBanks (const juce::File& root)
+{
+    std::cout << "\n=== M4 banks, subfolders, .raw, skipN, settings.txt ===\n";
+    const double sr = 48000.0;
+
+    root.getChildFile ("settings.txt").replaceWithText ("crossfadeTime = 100\nloopMode = 2  # ping-pong\nstartCVDivider = 8\n");
+
+    auto b0 = root.getChildFile ("0 first"); b0.createDirectory();
+    writeDC (b0.getChildFile ("a.wav"), 48000.0, 3.0, 0.5f);
+
+    auto b5 = root.getChildFile ("05 shortwave"); b5.createDirectory();
+    b5.getChildFile ("settings.txt").replaceWithText ("loopMode = 0\n");
+    writeDC (b5.getChildFile ("01 plain.wav"), 48000.0, 3.0, 0.1f);
+
+    auto seq = b5.getChildFile ("02 seq next"); seq.createDirectory();
+    writeDC (seq.getChildFile ("a.wav"), 48000.0, 3.0, 0.2f);
+    writeDC (seq.getChildFile ("b.wav"), 44100.0, 3.0, 0.3f);
+    writeDC (seq.getChildFile ("c.wav"), 48000.0, 3.0, 0.4f);
+
+    auto rnd = b5.getChildFile ("03 rand"); rnd.createDirectory();
+    writeDC (rnd.getChildFile ("a.wav"), 48000.0, 3.0, 0.15f);
+    writeDC (rnd.getChildFile ("b.wav"), 48000.0, 3.0, 0.25f);
+    writeDC (rnd.getChildFile ("c.wav"), 48000.0, 3.0, 0.35f);
+
+    auto skp = b5.getChildFile ("04 skipper next"); skp.createDirectory();
+    writeDC (skp.getChildFile ("a skip2.wav"), 48000.0, 3.0, 0.45f);
+    writeDC (skp.getChildFile ("b.wav"), 48000.0, 3.0, 0.55f);
+
+    writeRawDC (b5.getChildFile ("05 raw.raw"), 3.0, 0.25f);
+    writeRamp (b5.getChildFile ("._junk.wav"), 44100.0, 1.0, 16, 1);
+
+    auto b16 = root.getChildFile ("16 too high"); b16.createDirectory();
+    writeDC (b16.getChildFile ("e.wav"), 48000.0, 3.0, 0.9f);
+    writeDC (root.getChildFile ("stray.wav"), 48000.0, 3.0, 0.9f);
+
+    auto lib = scanFolder (root);
+    CHECK (lib->hasNumberedBanks && lib->banks.size() == 2, "two banks found (0 and 05); 16 and the root file are ignored");
+    if (lib->banks.size() != 2) return;
+    CHECK (lib->banks[0].number == 0 && lib->banks[1].number == 5, "banks are in number order");
+    CHECK (lib->banks[1].numSlots == 5, "bank 5 has 5 slots (file, next folder, random folder, skip folder, raw file)");
+    if (lib->banks[1].numSlots != 5) return;
+
+    const auto& slots = lib->slots;
+    const int s5 = lib->banks[1].firstSlot;
+    CHECK (slots[(size_t) s5].mode == SlotFile && slots[(size_t) s5 + 1].mode == SlotNext && slots[(size_t) s5 + 2].mode == SlotRandom
+           && slots[(size_t) s5 + 3].mode == SlotNext && slots[(size_t) s5 + 4].mode == SlotFile,
+           "slots in name order with the right modes");
+    CHECK (slots[(size_t) s5 + 1].numFiles == 3 && slots[(size_t) s5 + 2].numFiles == 3, "subfolders hold their 3 files");
+
+    const auto& raw = lib->stations[(size_t) slots[(size_t) s5 + 4].firstFile];
+    CHECK (raw.file.getFileName() == "05 raw.raw" && std::fabs (raw.info.sampleRate - 44100.0) < 1e-6 && raw.info.numFrames == (int64_t) (3.0 * 44100.0),
+           ".raw file read as 44.1 kHz mono, 3 s");
+    CHECK (lib->stations[(size_t) slots[(size_t) s5 + 3].firstFile].skip == 2, "skip2 recognised in the file name");
+
+    CHECK (settingOr (lib->banks[1].settings, "loopMode", -1) == 0 && settingOr (lib->banks[1].settings, "crossfadeTime", -1) == 100
+           && settingOr (lib->banks[0].settings, "loopMode", -1) == 2,
+           "settings.txt: bank 5 overrides loopMode and inherits crossfadeTime; bank 0 uses the top-level file");
+
+    RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+    Runner r { engine, sr };
+    RadioEngine::Params p;
+    p.crossfadeMs = 25.0f;
+
+    // bank 0
+    p.bank = 0; p.station = 0.5f;
+    CHECK (std::fabs (levelAfter (r, p, 0.6) - 0.5f) < 0.01f, "bank 0 plays its file (0.5)");
+    CHECK (engine.getNumStations() == 1, "bank 0 has 1 slot");
+
+    // bank 5
+    p.bank = 5; p.station = stationParam (0, 5);
+    CHECK (std::fabs (levelAfter (r, p, 0.6) - 0.1f) < 0.01f, "bank 5 slot 0 plays its plain file (0.1)");
+    CHECK (engine.getNumStations() == 5, "bank 5 has 5 slots");
+
+    // raw
+    p.station = stationParam (4, 5);
+    CHECK (std::fabs (levelAfter (r, p, 0.6) - 0.25f) < 0.01f, ".raw file plays at the right level (0.25)");
+
+    // a bank that does not exist
+    p.bank = 7;
+    levelAfter (r, p, 0.3);
+    CHECK (std::fabs (levelAfter (r, p, 0.4)) < 0.001f && engine.getNumStations() == 0, "a missing bank is silent");
+
+    // next folder: first file, then each Reset moves on, wrapping round
+    p.bank = 5; p.station = stationParam (1, 5);
+    CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.2f) < 0.01f, "next folder starts on its first file (0.2)");
+    const float expectNext[] = { 0.3f, 0.4f, 0.2f };
+    for (int i = 0; i < 3; ++i)
+    {
+        engine.requestReset();
+        const float got = levelAfter (r, p, 0.7);
+        CHECK (std::fabs (got - expectNext[i]) < 0.01f, "Reset steps a next folder to its next file");
+    }
+
+    // random folder: every Reset gives a different file than the one before, all from the folder
+    p.station = stationParam (2, 5);
+    float prev = levelAfter (r, p, 0.7);
+    bool allDiffer = true, allInSet = true;
+    auto inSet = [] (float v) { return std::fabs (v - 0.15f) < 0.01f || std::fabs (v - 0.25f) < 0.01f || std::fabs (v - 0.35f) < 0.01f; };
+    allInSet = inSet (prev);
+    for (int i = 0; i < 5; ++i)
+    {
+        engine.requestReset();
+        const float got = levelAfter (r, p, 0.7);
+        allDiffer = allDiffer && std::fabs (got - prev) > 0.05f;
+        allInSet = allInSet && inSet (got);
+        prev = got;
+    }
+    CHECK (allInSet, "random folder only plays its own files");
+    CHECK (allDiffer, "random folder never repeats the same file on consecutive Resets");
+
+    // skipN: "a skip2" ignores the next 2 resets, the 3rd moves on to the next file
+    p.station = stationParam (3, 5);
+    CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.45f) < 0.01f, "skip folder starts on the skip2 file (0.45)");
+    engine.requestReset(); CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.45f) < 0.01f, "first Reset is ignored");
+    engine.requestReset(); CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.45f) < 0.01f, "second Reset is ignored");
+    engine.requestReset(); CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.55f) < 0.01f, "third Reset moves on (0.55)");
+
+    // tuning away and back reloads the skip count for the file that is selected (it has no skip: Reset acts at once)
+    // Go back to the skip file by cycling the folder: reset wraps to a skip2.wav
+    engine.requestReset(); CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.45f) < 0.01f, "next Reset wraps back to the skip2 file");
+    engine.requestReset(); CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.45f) < 0.01f, "...and its resets are ignored again (1)");
+    p.station = stationParam (0, 5); levelAfter (r, p, 0.5);        // tune away
+    p.station = stationParam (3, 5); levelAfter (r, p, 0.5);        // and back: the count starts again at 2
+    engine.requestReset(); CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.45f) < 0.01f, "retuning reloads the skip count (1 of 2 ignored)");
+    engine.requestReset(); CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.45f) < 0.01f, "retuning reloads the skip count (2 of 2 ignored)");
+    engine.requestReset(); CHECK (std::fabs (levelAfter (r, p, 0.7) - 0.55f) < 0.01f, "then the next Reset moves on");
+
+    // reselect on tune: a next folder steps when it is tuned to
+    p.reselectOnTune = true;
+    p.station = stationParam (1, 5);
+    const float a = levelAfter (r, p, 0.7);
+    p.station = stationParam (0, 5); levelAfter (r, p, 0.5);
+    p.station = stationParam (1, 5);
+    const float b = levelAfter (r, p, 0.7);
+    CHECK (std::fabs (a - b) > 0.05f, "with reselect on tune, tuning back to a subfolder picks its next file");
+}
+
+int main (int argc, char** argv)
 {
     auto root = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rm_engine_test");
     root.deleteRecursively();
@@ -930,8 +1135,19 @@ int main()
     writeRamp (two.getChildFile ("a.wav"), 48000.0, 10.0, 24, 1);
     writeRamp (two.getChildFile ("b.wav"), 48000.0, 10.0, 24, 1);
 
+    root.getChildFile ("banks").createDirectory();
+
     auto sine = root.getChildFile ("sine"); sine.createDirectory();
     writeSine (sine.getChildFile ("sine.wav"), 44100.0, 10.0, 1000.0, 0.5f);
+
+    if (argc > 1 && std::string (argv[1]) == "m4")        // quick run of the milestone 4 tests only
+    {
+        testRules();
+        testBanks (root.getChildFile ("banks"));
+        root.deleteRecursively();
+        std::cout << "\n" << (failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED: " + std::to_string (failures) + " check(s)") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
 
     testPathMath();
     testAtRate (48000.0, ramps);
@@ -954,6 +1170,8 @@ int main()
     testPauseSilence (dc);
     testGritDC (dc);
     testStressM2 (ramps, dc);
+    testRules();
+    testBanks (root.getChildFile ("banks"));
     testLongFile (big);
 
     root.deleteRecursively();

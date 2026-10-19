@@ -116,6 +116,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout RadioMusicProcessor::createL
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "quantisePitch", 1 }, "Quantise pitch", true));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "gritMode", 1 }, "Grit mode", false));
 
+    // Milestone 4. Banks 0 to 15 (root folders named with a leading number).
+    layout.add (std::make_unique<AudioParameterInt> (ParameterID { "bank", 1 }, "Bank", 0, 15, 0));
+
     return layout;
 }
 
@@ -140,9 +143,15 @@ RadioMusicProcessor::RadioMusicProcessor()
     speedNotesParam = apvts.getRawParameterValue ("speedNotes");
     quantiseParam  = apvts.getRawParameterValue ("quantisePitch");
     gritParam      = apvts.getRawParameterValue ("gritMode");
+    bankParam      = apvts.getRawParameterValue ("bank");
+
+    startTimerHz (10);
 }
 
-RadioMusicProcessor::~RadioMusicProcessor() = default;
+RadioMusicProcessor::~RadioMusicProcessor()
+{
+    stopTimer();
+}
 
 bool RadioMusicProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
@@ -180,6 +189,9 @@ void RadioMusicProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     p.speedNotes  = speedNotesParam->load();
     p.quantisePitch = quantiseParam->load() > 0.5f;
     p.grit        = gritParam->load() > 0.5f;
+    p.bank        = juce::jlimit (0, rm::kNumBanks - 1, (int) std::lround (bankParam->load()));
+    p.startDivider = startDividerSetting.load (std::memory_order_relaxed);
+    p.reselectOnTune = reselectSetting.load (std::memory_order_relaxed);
 
     // Reset: a rising edge on the Reset parameter (host automation) restarts the tuned station.
     const bool resetNow = resetParam->load() > 0.5f;
@@ -231,6 +243,7 @@ juce::AudioProcessorEditor* RadioMusicProcessor::createEditor()
 void RadioMusicProcessor::setSampleFolder (const juce::File& folder)
 {
     apvts.state.setProperty ("sampleFolder", folder.getFullPathName(), nullptr);
+    applyOnReady.store (true);        // the user chose this folder: use its settings.txt (and its first bank) once it is read
     scanner.requestScan (folder);
 }
 
@@ -253,6 +266,78 @@ void RadioMusicProcessor::libraryReady (std::shared_ptr<const rm::Library> lib)
         library = lib;
     }
     engine.setLibrary (std::move (lib));
+    libraryChanged.store (true);
+}
+
+void RadioMusicProcessor::setParameterValue (const char* id, float realValue)
+{
+    if (auto* prm = apvts.getParameter (id))
+        prm->setValueNotifyingHost (prm->convertTo0to1 (realValue));
+}
+
+// settings.txt gives starting values for the matching knobs. Only keys that are present are applied. Message thread.
+void RadioMusicProcessor::applyBankSettings (const rm::Library& lib, int bankNumber)
+{
+    const auto* bank = lib.findBank (bankNumber);
+    if (bank == nullptr)
+        return;
+
+    const auto& s = bank->settings;
+    using namespace rm;
+
+    if (hasSetting (s, "speedMode"))       setParameterValue ("speedMode", (float) juce::jlimit (0, 2, settingOr (s, "speedMode", 0)));
+    if (hasSetting (s, "quantisePitchPot")) setParameterValue ("quantisePitch", settingOr (s, "quantisePitchPot", 1) != 0 ? 1.0f : 0.0f);
+    if (hasSetting (s, "loopMode"))        setParameterValue ("loopMode", (float) juce::jlimit (0, 2, settingOr (s, "loopMode", 1)));
+    if (hasSetting (s, "radioStart"))      setParameterValue ("radioStart", settingOr (s, "radioStart", 1) != 0 ? 1.0f : 0.0f);
+    if (hasSetting (s, "crossfadeTime"))   setParameterValue ("crossfade", (float) juce::jlimit (1, 60000, settingOr (s, "crossfadeTime", 25)));
+    if (hasSetting (s, "highQuality"))     setParameterValue ("gritMode", settingOr (s, "highQuality", 1) != 0 ? 0.0f : 1.0f);
+    if (hasSetting (s, "startPotImmediate")) setParameterValue ("startImmediate", settingOr (s, "startPotImmediate", 0) != 0 ? 1.0f : 0.0f);
+}
+
+// Settings that have no knob always follow the files on disk (the folder's own settings.txt for the current bank).
+void RadioMusicProcessor::updateRuntimeSettings (const rm::Library* lib, int bankNumber)
+{
+    int divider = rm::kStartDivider;
+    bool reselect = false;
+
+    if (lib != nullptr)
+        if (const auto* bank = lib->findBank (bankNumber))
+        {
+            divider  = juce::jlimit (1, rm::kStartSteps, rm::settingOr (bank->settings, "startCVDivider", rm::kStartDivider));
+            reselect = rm::settingOr (bank->settings, "reselectSubdirOnStationChange", 0) != 0;
+        }
+
+    startDividerSetting.store (divider);
+    reselectSetting.store (reselect);
+}
+
+void RadioMusicProcessor::timerCallback()
+{
+    int bank = juce::jlimit (0, rm::kNumBanks - 1, (int) std::lround (bankParam->load()));
+
+    if (libraryChanged.exchange (false))
+    {
+        const auto lib = getLibrary();
+
+        if (lib != nullptr && applyOnReady.exchange (false))
+        {
+            bank = lib->lowestBankNumber();
+            setParameterValue ("bank", (float) bank);
+            lastBank = bank;
+            applyBankSettings (*lib, bank);
+        }
+
+        updateRuntimeSettings (lib.get(), bank);
+    }
+
+    if (bank != lastBank)            // the bank was changed by the user or by automation
+    {
+        lastBank = bank;
+        const auto lib = getLibrary();
+        if (lib != nullptr)
+            applyBankSettings (*lib, bank);
+        updateRuntimeSettings (lib.get(), bank);
+    }
 }
 
 void RadioMusicProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -268,6 +353,10 @@ void RadioMusicProcessor::setStateInformation (const void* data, int sizeInBytes
         if (xml->hasTagName (apvts.state.getType()))
         {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+
+            // A restored project keeps its own knob values: do not apply settings.txt because the bank "changed".
+            lastBank = juce::jlimit (0, rm::kNumBanks - 1, (int) std::lround (bankParam->load()));
+            applyOnReady.store (false);
 
             const auto folder = getSampleFolder();
             if (folder != juce::File())

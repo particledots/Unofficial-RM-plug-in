@@ -44,6 +44,8 @@ RadioEngine::RadioEngine()
 
     refClock.fill (0.0);
     epochOf.fill (0u);
+    slotCur.fill (0);
+    skipLeft.fill (0);
 
     streamThread = std::make_unique<StreamThread> (*this);
     streamThread->startThread();
@@ -90,14 +92,34 @@ void RadioEngine::setLibrary (std::shared_ptr<const Library> library)
         ++slot;                                   // 3 slots, at most 2 excluded
 
     auto& t = tables[(size_t) slot];
-    t.id    = id;
-    t.count = 0;
+    t.id = id;
+    t.bankFirst.fill (0);
+    t.bankCount.fill (0);
 
     if (library != nullptr)
     {
-        t.count = (int) std::min<size_t> (library->stations.size(), (size_t) kMaxStationsPerBank);
-        for (int i = 0; i < t.count; ++i)
+        const int nFiles = (int) std::min<size_t> (library->stations.size(), (size_t) kMaxFiles);
+        for (int i = 0; i < nFiles; ++i)
+        {
             t.info[(size_t) i] = library->stations[(size_t) i].info;
+            t.skip[(size_t) i] = (uint8_t) juce::jlimit (0, 255, library->stations[(size_t) i].skip);
+        }
+
+        const int nSlots = (int) std::min<size_t> (library->slots.size(), (size_t) kMaxFiles);
+        for (int i = 0; i < nSlots; ++i)
+        {
+            const auto& ls = library->slots[(size_t) i];
+            t.slots[(size_t) i] = { ls.firstFile, ls.numFiles, ls.mode };
+        }
+
+        for (const auto& b : library->banks)
+        {
+            if (b.number >= 0 && b.number < kNumBanks && b.firstSlot + b.numSlots <= nSlots)
+            {
+                t.bankFirst[(size_t) b.number] = b.firstSlot;
+                t.bankCount[(size_t) b.number] = b.numSlots;
+            }
+        }
     }
 
     activeTable.store (slot);
@@ -141,10 +163,35 @@ void RadioEngine::invalidateAll() noexcept
 
     current = pending = -1;
     committedSig = pendingSig = Sig {};
-    lastDesiredStation = -2;
+    lastDesiredSlot = -2;
     badStation.fill (false);
     refClock.fill (0.0);
     epochOf.fill (0u);
+    slotCur.fill (0);
+    skipLeft.fill (0);
+}
+
+// A subfolder supplies a different file: the next one in order for a "...next" folder, otherwise a random one
+// (never the same one twice in a row when there is a choice; not documented).
+void RadioEngine::reselect (int g, const Table& t) noexcept
+{
+    const auto& sl = t.slots[(size_t) g];
+    if (sl.numFiles < 2)
+        return;
+
+    int& cur = slotCur[(size_t) g];
+
+    if (sl.mode == SlotNext)
+    {
+        cur = (cur + 1) % sl.numFiles;
+    }
+    else if (sl.mode == SlotRandom)
+    {
+        rngState ^= rngState << 13;
+        rngState ^= rngState >> 17;
+        rngState ^= rngState << 5;
+        cur = (cur + 1 + (int) (rngState % (uint32_t) (sl.numFiles - 1))) % sl.numFiles;
+    }
 }
 
 void RadioEngine::requestVoice (Voice& v, const Sig& sig, const Table& t, int64_t clock, float fadeInc) noexcept
@@ -286,7 +333,7 @@ void RadioEngine::tryAlign (int voiceIndex, const Table& t, int64_t clock) noexc
 
     if (v.failedGen.load (std::memory_order_acquire) == v.gen)
     {
-        if (v.sig.station >= 0 && v.sig.station < kMaxStationsPerBank)
+        if (v.sig.station >= 0 && v.sig.station < kMaxFiles)
             badStation[(size_t) v.sig.station] = true;
 
         if (voiceIndex == pending)
@@ -439,11 +486,12 @@ void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int6
         setIdle (v);
 }
 
-void RadioEngine::publishStatus (const Table& t, int64_t clock, int desiredStation) noexcept
+void RadioEngine::publishStatus (const Table&, int64_t clock, int desiredSlot, int desiredFile, int slotCount) noexcept
 {
     uiClockSeconds.store ((double) clock / sessionRate, std::memory_order_relaxed);
-    uiStation.store (desiredStation);
-    uiCount.store (t.count);
+    uiStation.store (desiredSlot);
+    uiFile.store (desiredFile);
+    uiCount.store (slotCount);
 
     // Loop window, as fractions of the file (for the display).
     const double nominal = 1048576.0;
@@ -476,12 +524,34 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     {
         invalidateAll();
         knownTableId = t.id;
+
+        // A random subfolder starts on a random file; a "next" subfolder starts on its first.
+        for (int g = 0; g < kMaxFiles; ++g)
+        {
+            const auto& sl = t.slots[(size_t) g];
+            if (sl.mode == SlotRandom && sl.numFiles > 1)
+            {
+                rngState ^= rngState << 13;
+                rngState ^= rngState >> 17;
+                rngState ^= rngState << 5;
+                slotCur[(size_t) g] = (int) (rngState % (uint32_t) sl.numFiles);
+            }
+        }
     }
 
-    const int count = t.count;
-    int desiredStation = -1;
+    // The dial picks a slot in the chosen bank; a slot is one file, or a subfolder that supplies one file at a time.
+    const int bank       = juce::jlimit (0, kNumBanks - 1, p.bank);
+    const int count      = t.bankCount[(size_t) bank];
+    const int firstSlot  = t.bankFirst[(size_t) bank];
+    const int divider    = juce::jlimit (1, kStartSteps, p.startDivider);
+
+    int desiredSlot = -1;                  // position on the dial, 0 .. count - 1
     if (count > 0)
-        desiredStation = juce::jlimit (0, count - 1, (int) std::floor (juce::jlimit (0.0f, 1.0f, p.station) * (float) count));
+        desiredSlot = juce::jlimit (0, count - 1, (int) std::floor (juce::jlimit (0.0f, 1.0f, p.station) * (float) count));
+
+    const int globalSlot = desiredSlot >= 0 ? firstSlot + desiredSlot : -1;
+    auto fileOfSlot = [&] (int g) { return g >= 0 ? t.slots[(size_t) g].firstFile + slotCur[(size_t) g] : -1; };
+    int desiredStation = fileOfSlot (globalSlot);   // index of the file that plays (all per-file arrays use this)
 
     int64_t clock = clockSamples.load (std::memory_order_relaxed);
 
@@ -490,7 +560,7 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     {
         if (! p.hostPlaying || p.hostSamples < 0)
         {
-            publishStatus (t, clock, desiredStation);
+            publishStatus (t, clock, desiredSlot, desiredStation, count);
             readingTable.store (-1);
             return;
         }
@@ -507,7 +577,7 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
 
     if (! settingsInit)
     {
-        latchedStart = quantiseStep (p.startNorm, kStartDivider);
+        latchedStart = quantiseStep (p.startNorm, divider);
         appliedEnd   = quantiseStep (p.endNorm, 1);
         seenStart = latchedStart;
         seenEnd   = appliedEnd;
@@ -562,32 +632,59 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
         if (endStable >= settle)
             appliedEnd = seenEnd;
 
-        const int startNow = quantiseStep (p.startNorm, kStartDivider);
+        const int startNow = quantiseStep (p.startNorm, divider);
         if (startNow != seenStart) { seenStart = startNow; startStable = 0; } else startStable += n;
         if (p.startImmediate && startStable >= settle)
             latchedStart = seenStart;
 
         // Reset: restart the tuned station from START. START is read at this moment.
+        // A file named "...skipN" makes the next N resets be ignored while it plays; a subfolder moves on to its next file.
         if (resetFlag.exchange (false))
         {
-            latchedStart = startNow;
-            if (desiredStation >= 0)
+            if (globalSlot < 0)
             {
+                latchedStart = startNow;
+            }
+            else if (skipLeft[(size_t) globalSlot] > 0)
+            {
+                skipLeft[(size_t) globalSlot] -= 1;           // ignored
+            }
+            else
+            {
+                latchedStart = startNow;
+                reselect (globalSlot, t);
+                desiredStation = fileOfSlot (globalSlot);
                 refClock[(size_t) desiredStation] = (double) clock;
                 epochOf[(size_t) desiredStation] += 1;
+                skipLeft[(size_t) globalSlot] = (int) t.skip[(size_t) desiredStation];
             }
         }
 
-        // With radio start off, tuning to a station restarts it from START.
-        if (desiredStation != lastDesiredStation)
+        // Tuning to a station: a subfolder may pick a new file (if enabled), skipN counts start, and with radio start off
+        // the station restarts from START.
+        if (globalSlot != lastDesiredSlot)
         {
-            if (! p.radioStart && desiredStation >= 0)
+            if (globalSlot >= 0)
             {
-                latchedStart = startNow;
-                refClock[(size_t) desiredStation] = (double) clock;
-                epochOf[(size_t) desiredStation] += 1;
+                bool restart = ! p.radioStart;
+
+                if (p.reselectOnTune && t.slots[(size_t) globalSlot].numFiles > 1)
+                {
+                    reselect (globalSlot, t);
+                    desiredStation = fileOfSlot (globalSlot);
+                    restart = true;
+                }
+
+                if (restart)
+                {
+                    latchedStart = startNow;
+                    refClock[(size_t) desiredStation] = (double) clock;
+                    epochOf[(size_t) desiredStation] += 1;
+                }
+
+                skipLeft[(size_t) globalSlot] = (int) t.skip[(size_t) desiredStation];
             }
-            lastDesiredStation = desiredStation;
+            lastDesiredSlot = globalSlot;
         }
 
         // Playing backwards needs a voice that reads the path backwards: switch once the speed has crossed zero.
@@ -671,7 +768,7 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     }
 
     clockSamples.store (clock, std::memory_order_relaxed);
-    publishStatus (t, clock, desiredStation);
+    publishStatus (t, clock, desiredSlot, desiredStation, count);
     readingTable.store (-1);
 }
 
