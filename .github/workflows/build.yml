@@ -1,0 +1,120 @@
+name: Build Radio Music (unofficial)
+
+# Runs only when something is pushed to main, or when started by hand from the Actions tab.
+# It never runs for other branches or pull requests.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: Build AU + VST3 (macOS, universal)
+    runs-on: macos-15
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Show tool versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          cmake --version
+          ninja --version
+
+      - name: Configure (downloads JUCE 9.0.4)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build the AU, the VST3 and the engine test
+        run: |
+          cmake --build build --target RadioMusicUnofficial_AU RadioMusicUnofficial_VST3 RadioEngineTest
+
+      - name: Run the engine test
+        id: enginetest
+        continue-on-error: true
+        run: |
+          TESTBIN="$(find build -type f -name RadioEngineTest -perm -u+x | head -1)"
+          echo "Running $TESTBIN"
+          "$TESTBIN" 2>&1 | tee enginetest.log
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Locate the built plug-ins
+        run: |
+          AU="$(find build -type d -name "Radio Music Unofficial.component" | head -1)"
+          VST="$(find build -type d -name "Radio Music Unofficial.vst3" | head -1)"
+          echo "AU:   $AU"
+          echo "VST3: $VST"
+          test -n "$AU"
+          test -n "$VST"
+          echo "AU_PATH=$AU" >> "$GITHUB_ENV"
+          echo "VST_PATH=$VST" >> "$GITHUB_ENV"
+
+      - name: Ad-hoc sign both plug-ins
+        run: |
+          codesign --force --deep --sign - "$AU_PATH"
+          codesign --force --deep --sign - "$VST_PATH"
+          codesign --verify --verbose=2 "$AU_PATH"
+          codesign --verify --verbose=2 "$VST_PATH"
+
+      - name: Show architectures and minimum macOS version
+        run: |
+          for f in "$AU_PATH/Contents/MacOS/Radio Music Unofficial" "$VST_PATH/Contents/MacOS/Radio Music Unofficial"; do
+            echo "== $f"
+            lipo -archs "$f"
+            otool -l "$f" | grep -A4 -E "LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX" | grep -E "minos|version" || true
+          done
+
+      - name: Validate the AU with auval
+        id: auval
+        continue-on-error: true
+        run: |
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
+          cp -R "$AU_PATH" "$HOME/Library/Audio/Plug-Ins/Components/"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 5
+          auval -a | tee auval-list.log
+          auval -v aumu Rmux Pdts 2>&1 | tee auval.log
+          grep -q "AU VALIDATION SUCCEEDED" auval.log
+
+      - name: Package
+        run: |
+          mkdir -p dist/RadioMusicUnofficial
+          cp -R "$AU_PATH" dist/RadioMusicUnofficial/
+          cp -R "$VST_PATH" dist/RadioMusicUnofficial/
+          cp INSTALL.txt LICENSE dist/RadioMusicUnofficial/
+          ditto -c -k --keepParent dist/RadioMusicUnofficial RadioMusicUnofficial-macOS.zip
+          ls -l RadioMusicUnofficial-macOS.zip
+
+      - name: Write a summary
+        if: always()
+        run: |
+          {
+            echo "## Radio Music (unofficial) build"
+            echo ""
+            echo "- Engine test: ${{ steps.enginetest.outcome }}"
+            echo "- auval (AU validation): ${{ steps.auval.outcome }}"
+            echo ""
+            echo "Download the **RadioMusicUnofficial-macOS** artifact at the bottom of this page."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the plug-ins
+        uses: actions/upload-artifact@v7
+        with:
+          name: RadioMusicUnofficial-macOS
+          path: RadioMusicUnofficial-macOS.zip
+          if-no-files-found: error
+
+      - name: Upload the test and validation logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs
+          path: |
+            enginetest.log
+            auval.log
+            auval-list.log
+          if-no-files-found: ignore
