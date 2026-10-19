@@ -123,19 +123,21 @@ private:
     void addHint (juce::Component& c, std::function<juce::String()> text);
     void applySpeedMode (int mode);
     void applyTunerMode (int mode);
+    void refreshSpeedUi();
+    int effectiveSpeedMode() const noexcept;
     void updateSnap();
 
     RadioMusicProcessor& processor;
 
     rmui::DialDisplay dial;
     rmui::BankStepper bankStepper;
-    rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob, speedKnob, noiseKnob, whistleKnob, strengthKnob;
+    rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob, speedKnob, noiseKnob, whistleKnob, strengthKnob, advanceKnob;
     rmui::RmButton resetButton, pauseButton, hostSyncButton, radioStartButton, immediateButton, folderButton, rescanButton;
     rmui::RmButton quantiseButton, gritButton, ssbButton;
     rmui::Segmented loopSelector, speedModeSelector, tunerSelector, fadeSelector;
 
     juce::AudioProcessorValueTreeState::SliderAttachment startAttach, endAttach, crossfadeAttach, volumeAttach,
-                                                         noiseAttach, whistleAttach, strengthAttach;
+                                                         noiseAttach, whistleAttach, strengthAttach, advanceAttach;
     juce::AudioProcessorValueTreeState::ButtonAttachment pauseAttach, hostSyncAttach, radioStartAttach, immediateAttach,
                                                          quantiseAttach, gritAttach, ssbAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;   // follows the speed mode

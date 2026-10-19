@@ -721,7 +721,6 @@ static void testSpeeds (const juce::File& dir)
         { "notes +7 semitones",          RadioEngine::SpeedNotes, 100.0f,  7.0f, true,  std::exp2 (7.0 / 12.0) },
         { "notes +5.4, quantised: 5",    RadioEngine::SpeedNotes, 100.0f,  5.4f, true,  std::exp2 (5.0 / 12.0) },
         { "notes +5.4, not quantised",   RadioEngine::SpeedNotes, 100.0f,  5.4f, false, std::exp2 (5.4 / 12.0) },
-        { "90s mode (not yet separate): original speed", RadioEngine::Speed90s, 300.0f, 7.0f, true, 1.0 },
     };
 
     for (auto& c : cases)
@@ -1370,6 +1369,162 @@ static void testRadio (const juce::File& dc)
     CHECK (maxStep < 0.003, "walking from one station to the next: no clicks");
 }
 
+
+//==============================================================================
+// Milestone 6: 90s mode (granular time stretch, pitch and advance rate separate)
+
+static double zeroCrossHz (const std::vector<float>& v, double sr)
+{
+    int crossings = 0;
+    for (size_t i = 1; i < v.size(); ++i)
+        if (v[i - 1] <= 0.0f && v[i] > 0.0f)
+            ++crossings;
+    return (double) crossings * sr / (double) v.size();
+}
+
+static std::vector<float> record (Runner& r, RadioEngine::Params& p, double settle, double seconds)
+{
+    r.run (settle, p);
+    std::vector<float> all;
+    r.run (seconds, p, [&] (int64_t, const float* o, int n) { all.insert (all.end(), o, o + n); });
+    return all;
+}
+
+static double rmsOf (const std::vector<float>& v)
+{
+    double sq = 0.0;
+    for (auto x : v) sq += (double) x * x;
+    return std::sqrt (sq / (double) v.size());
+}
+
+static void test90s (const juce::File& ramp, const juce::File& sine)
+{
+    std::cout << "\n=== M6 '90s mode ===\n";
+    const double sr = 44100.0;
+
+    // 1. pitch 100%, advance 100%: identical to the plain file
+    {
+        auto lib = scanFolder (ramp);
+        RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+        Runner r { engine, sr, 256 };
+        RadioEngine::Params p; p.station = 0.5f; p.speedMode = RadioEngine::Speed90s;
+        r.run (0.5, p);
+        double worst = 0.0; int blocks = 0;
+        const auto info = lib->stations[0].info;
+        r.run (1.0, p, [&] (int64_t clock, const float* o, int n)
+        {
+            for (int i = 0; i < n; i += 16)
+                worst = std::max (worst, std::fabs ((double) o[i] - expectedRamp (info, clock + i, sr)));
+            ++blocks;
+        });
+        std::cout << "    worst difference from the plain file " << worst << "\n";
+        CHECK (worst < 2.0e-4, "pitch 100% / advance 100%: the file plays exactly as normal");
+    }
+
+    auto lib = scanFolder (sine);
+    RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+    Runner r { engine, sr, 256 };
+    RadioEngine::Params p; p.station = 0.5f; p.speedMode = RadioEngine::Speed90s;
+
+    // 2. pitch changes the tone, not the advance
+    struct PitchCase { float pitch; double hz; };
+    for (const auto& c : { PitchCase { 200.0f, 2000.0 }, PitchCase { 50.0f, 500.0 }, PitchCase { -100.0f, 1000.0 }, PitchCase { 100.0f, 1000.0 } })
+    {
+        p.speedTape = c.pitch;
+        const auto v = record (r, p, 0.4, 0.5);
+        const double hz = zeroCrossHz (v, sr);
+        std::cout << "    pitch " << c.pitch << "% -> " << hz << " Hz (expected " << c.hz << ")\n";
+        CHECK (std::fabs (hz - c.hz) < c.hz * 0.08, "pitch knob sets the pitch");
+        CHECK (rmsOf (v) > 0.2, "...and the sound stays at full level");
+    }
+
+    // 3. frozen advance keeps sounding
+    p.speedTape = 100.0f; p.advance90 = 0.0f;
+    {
+        const auto v = record (r, p, 0.6, 0.5);
+        std::cout << "    advance 0%: rms " << rmsOf (v) << "\n";
+        CHECK (rmsOf (v) > 0.1, "advance 0%: the sample keeps playing (frozen position, no silence)");
+    }
+
+    // 4. advance rate moves the file forward at that rate (ramp file, pitch unaffected)
+    {
+        auto rl = scanFolder (ramp);
+        RadioEngine e2; e2.prepare (sr); e2.setLibrary (rl);
+        Runner r2 { e2, sr, 256 };
+        RadioEngine::Params q; q.station = 0.5f; q.speedMode = RadioEngine::Speed90s; q.advance90 = 50.0f;
+        r2.run (0.5, q);
+        auto a = record (r2, q, 0.0, 0.2);
+        auto b = record (r2, q, 1.5, 0.2);
+        double ma = 0.0, mb = 0.0;
+        for (auto x : a) ma += x;
+        for (auto x : b) mb += x;
+        ma /= (double) a.size(); mb /= (double) b.size();
+        const double slope = (mb - ma) / 1.5;
+        const auto info = rl->stations[0].info;
+        const double normalSlope = 0.9 * (info.sampleRate / sr) * sr / (double) info.numFrames;   // per second at 1x
+        std::cout << "    advance 50%: slope " << slope << " per second (normal " << normalSlope << ")\n";
+        CHECK (slope > normalSlope * 0.35 && slope < normalSlope * 0.65, "advance 50%: the file moves forward at about half speed");
+    }
+
+    // 5. Pause freezes the advance but the sound continues
+    p.advance90 = 100.0f; p.paused = true;
+    {
+        const auto v = record (r, p, 0.8, 0.4);
+        CHECK (rmsOf (v) > 0.1, "pause in '90s mode: advance freezes, sound continues");
+    }
+    p.paused = false;
+    {
+        const auto v = record (r, p, 0.8, 0.4);
+        CHECK (rmsOf (v) > 0.2 && std::fabs (zeroCrossHz (v, sr) - 1000.0) < 80.0, "released: normal playback again");
+    }
+
+    // 6. Soft and Radio tuners do not offer 90s: Tape is used (advance is ignored)
+    {
+        p.tunerMode = RadioEngine::TunerSoft; p.advance90 = 0.0f; p.speedTape = 200.0f;
+        const auto v = record (r, p, 0.6, 0.4);
+        const double hz = zeroCrossHz (v, sr);
+        std::cout << "    Soft tuner with '90s selected: " << hz << " Hz\n";
+        CHECK (std::fabs (hz - 2000.0) < 160.0 && rmsOf (v) > 0.2, "'90s with the Soft tuner falls back to Tape speed");
+        p.tunerMode = RadioEngine::TunerSharp;
+    }
+
+    // 7. switching between modes while playing
+    {
+        p.speedTape = 100.0f; p.advance90 = 100.0f;
+        r.run (0.3, p);
+        p.speedMode = RadioEngine::SpeedTape;
+        auto v = record (r, p, 0.3, 0.3);
+        CHECK (rmsOf (v) > 0.2, "'90s -> Tape while playing: sound continues");
+        p.speedMode = RadioEngine::Speed90s;
+        v = record (r, p, 0.3, 0.3);
+        CHECK (rmsOf (v) > 0.2, "Tape -> '90s while playing: sound continues");
+    }
+
+    // 8. stress: wild pitch and advance moves never produce NaN or runaway levels
+    {
+        bool bad = false; double peak = 0.0;
+        uint32_t seed = 12345u;
+        auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (double) (seed >> 8) / 16777216.0; };
+        int blocks = 0;
+        r.run (3.0, p, [&] (int64_t, const float* o, int n)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                if (! std::isfinite (o[i])) bad = true;
+                peak = std::max (peak, (double) std::fabs (o[i]));
+            }
+            if (++blocks % 8 == 0)
+            {
+                p.speedTape = (float) (rnd() * 800.0 - 400.0);
+                p.advance90 = (float) (rnd() * 400.0);
+                p.station = (float) rnd();
+            }
+        });
+        std::cout << "    stress peak " << peak << "\n";
+        CHECK (! bad && peak < 2.5, "random pitch / advance / station changes: finite, bounded output");
+    }
+}
+
 int main (int argc, char** argv)
 {
     auto root = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rm_engine_test");
@@ -1409,6 +1564,14 @@ int main (int argc, char** argv)
 
     auto sine = root.getChildFile ("sine"); sine.createDirectory();
     writeSine (sine.getChildFile ("sine.wav"), 44100.0, 10.0, 1000.0, 0.5f);
+
+    if (argc > 1 && std::string (argv[1]) == "m6")        // quick run of the milestone 6 tests only
+    {
+        test90s (win, sine);
+        root.deleteRecursively();
+        std::cout << "\n" << (failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED: " + std::to_string (failures) + " check(s)") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
 
     if (argc > 1 && std::string (argv[1]) == "m5")        // quick run of the milestone 5 tests only
     {
@@ -1454,6 +1617,7 @@ int main (int argc, char** argv)
     testBanks (root.getChildFile ("banks"));
     testSoft (dc, dc3);
     testRadio (dc);
+    test90s (win, sine);
     testLongFile (big);
 
     root.deleteRecursively();

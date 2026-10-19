@@ -1,4 +1,4 @@
-// Radio Music (unofficial) - playback engine (milestone 5).
+// Radio Music (unofficial) - playback engine (milestone 6).
 // Clean-room implementation from the documented behaviour of Music Thing
 // Modular's Radio Music mk2 (Tom Whitwell with Chris Johnson).
 //
@@ -63,8 +63,9 @@ public:
         bool  reselectOnTune = false;    // documented reselectSubdirOnStationChange: subfolders pick a new file when tuned to
 
         // Speed (affects the tuned station only; background stations always advance at 1x).
-        int   speedMode   = SpeedTape;   // SpeedTape, SpeedNotes or Speed90s (90s: plays at original speed for now)
-        float speedTape   = 100.0f;      // percent of original speed, -400..+400 (negative plays backwards)
+        int   speedMode   = SpeedTape;   // SpeedTape, SpeedNotes or Speed90s (90s is only available with the Sharp tuner; otherwise Tape is used)
+        float speedTape   = 100.0f;      // percent of original speed, -400..+400 (negative plays backwards). In 90s mode: the pitch
+        float advance90   = 100.0f;      // 90s mode: how fast the file moves forward, percent of normal, 0..400 (Pause freezes it)
         float speedNotes  = 0.0f;        // semitones, -48..+24
         bool  quantisePitch = true;      // notes mode: round to whole semitones
         bool  grit        = false;       // false: cubic interpolation. true: zero-order hold, 8-bit, ~20 kHz
@@ -127,6 +128,8 @@ private:
     static constexpr double kWhistleLevel     = 0.12;   // radio mode: whistle level at whistleVol 100
     static constexpr double kWhistleMaxHz     = 2000.0; // radio mode: whistle pitch at the edge of reception
     static constexpr double kSsbMaxHz         = 300.0;  // radio mode: ring-modulation frequency at the edge of reception
+    static constexpr double kGrainSeconds     = 0.045;  // 90s mode: grain length (two grains overlap by half)
+    static constexpr int    kHistFrames       = 1 << 16; // 90s mode: frames of already-played audio kept for grains reading backwards
     static constexpr double kSettleSeconds    = 0.04;   // a moved End (or immediate Start) must hold still this long before it is used
 
     static constexpr int kMaxFiles = kMaxFilesTotal;
@@ -168,7 +171,7 @@ private:
 
     struct Voice
     {
-        Voice() : data ((size_t) kFifoFrames, 0.0f) {}
+        Voice() : data ((size_t) kFifoFrames, 0.0f), hist ((size_t) kHistFrames, 0.0f) {}
 
         // ---- shared between audio thread and stream thread ----
         std::atomic<uint32_t> reqGen    { 0 };
@@ -212,6 +215,15 @@ private:
         float    h[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // previous, current, next, next-but-one frames (for interpolation)
         float    level = 0.0f, levelTarget = 0.0f, levelInc = 0.0f;
         float    fadeInc = 0.0f;
+
+        // 90s mode (granular time stretch). The cursor moves at the advance rate; two overlapping grains read the file at the
+        // pitch rate starting from the cursor.
+        bool     grain = false;
+        double   cursor = 0.0;                  // absolute frame position (same counting as consumed)
+        int64_t  histStart = 0;                 // first frame that exists in hist
+        int      grainClock = 0;
+        std::vector<float> hist;
+        struct Grain { bool on = false; double pos = 0.0; int k = 0; } grains[2];
     };
 
     class StreamThread;
@@ -228,6 +240,9 @@ private:
     void renderVoice (Voice& v, float* out, int n, const Table& t, int64_t clock,
                       const float* eff, double sumEff, const float* gain, bool cubic,
                       float chanGain0, float chanGain1, bool linearFade) noexcept;
+    void renderVoiceGrain (Voice& v, float* out, int n, const Table& t, int64_t clock,
+                           const float* eff, double sumEff, const float* pitch, bool cubic,
+                           float chanGain0, float chanGain1, bool linearFade) noexcept;
     void applyRadio (float* out, int n, double ampT, double noiseT, double whistleT, double whistleHzT, double ssbHzT) noexcept;
     bool popFrames (Voice& v, float* dst, int num) noexcept;
     double tauFor (int station, int64_t clock, double fileRate) const noexcept;
@@ -283,6 +298,11 @@ private:
     std::array<int, kMaxFiles>      slotCur {};      // per slot: which of its files is selected
     std::array<int, kMaxFiles>      skipLeft {};     // per slot: resets still to be ignored (skipN)
     uint32_t rngState = 0x9e3779b9u;
+    bool     grainNow = false;                     // 90s mode is active for this block
+    int      grainLen = 2048;
+    std::vector<float> grainWin;                   // Hann window, grainLen long
+    double   pitchSm = 1.0;                        // smoothed 90s pitch (linear speed, negative = backwards)
+    std::array<float, kRenderChunk> pitchArr {};
     std::vector<float> scratch;
 
     bool   settingsInit = false;

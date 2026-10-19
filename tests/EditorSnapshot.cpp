@@ -118,6 +118,34 @@ int main (int argc, char** argv)
         return 0;
     }
 
+    // MIDI check: a note-on for note 36 is a Reset, other notes are not.
+    if (argc > 2 && juce::String (argv[2]) == "miditest")
+    {
+        proc.setSampleFolder (folder);
+        for (int i = 0; i < 100 && proc.getLibrary() == nullptr; ++i) juce::Thread::sleep (50);
+        setParam (proc, "station", 0.3f);
+        pump (proc, 0.5);
+
+        auto sendNote = [&] (int note, bool on)
+        {
+            juce::AudioBuffer<float> buf (2, 512);
+            juce::MidiBuffer midi;
+            midi.addEvent (on ? juce::MidiMessage::noteOn (1, note, (juce::uint8) 100) : juce::MidiMessage::noteOff (1, note), 10);
+            buf.clear();
+            proc.processBlock (buf, midi);
+        };
+
+        const auto before = proc.getEngine().getResetsApplied();
+        sendNote (60, true);  sendNote (60, false);
+        const auto afterOther = proc.getEngine().getResetsApplied();
+        sendNote (36, true);  sendNote (36, false);
+        sendNote (36, true);
+        const auto afterReset = proc.getEngine().getResetsApplied();
+        std::cout << "resets: start " << before << ", after note 60: " << afterOther << ", after two note-ons for 36: " << afterReset << "\n";
+        std::cout << ((afterOther == before && afterReset == before + 2) ? "MIDI OK" : "MIDI FAIL") << "\n";
+        return (afterOther == before && afterReset == before + 2) ? 0 : 1;
+    }
+
     // 1. empty state
     snap (proc, outDir.getChildFile ("1_no_folder.png"));
 

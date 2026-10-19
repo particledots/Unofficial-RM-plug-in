@@ -70,6 +70,11 @@ float RadioEngine::stationStrength (int globalSlot, int minStrength) noexcept
 void RadioEngine::prepare (double sessionSampleRate)
 {
     sessionRate = sessionSampleRate > 0.0 ? sessionSampleRate : 44100.0;
+    grainLen = std::max (64, 2 * (int) std::lround (kGrainSeconds * sessionRate * 0.5));
+    grainWin.assign ((size_t) grainLen, 0.0f);
+    for (int i = 0; i < grainLen; ++i)
+        grainWin[(size_t) i] = 0.5f - 0.5f * std::cos (2.0f * juce::MathConstants<float>::pi * (float) i / (float) grainLen);
+    pitchSm = 1.0;
     clockSamples.store (0);
     underruns.store (0);
     knownTableId = tables[(size_t) activeTable.load()].id;
@@ -219,6 +224,7 @@ void RadioEngine::requestVoice (Voice& v, const Sig& sig, const Table& t, int64_
     v.phase     = 0.0;
     v.consumed  = 0;
     v.state     = Voice::State::Loading;
+    v.grain     = grainNow;
     v.cfg       = makeCfg (sig.startStep, sig.endStep, info.numFrames, sig.loopMode);
     v.tauStart  = (int64_t) std::floor (tauFor (sig.station, clock, info.sampleRate));
 
@@ -393,16 +399,30 @@ void RadioEngine::tryAlign (int voiceIndex, const Table& t, int64_t clock) noexc
     if ((int64_t) v.fifo.getNumReady() < skip + 4)
         return;                                          // wait for the stream thread to read further
 
-    popFrames (v, nullptr, (int) skip);
-    float three[3] {};
-    popFrames (v, three, 3);
-    v.h[0] = three[0];                                   // no earlier frame is known: repeat the first one
-    v.h[1] = three[0];
-    v.h[2] = three[1];
-    v.h[3] = three[2];
-    v.phase = skipReal - (double) skip;
-    v.consumed = skip;
-    v.state = Voice::State::Playing;
+    if (v.grain)                                         // 90s mode: the cursor sits on the station's position
+    {
+        popFrames (v, nullptr, (int) skip);
+        v.consumed  = skip;
+        v.histStart = skip;
+        v.cursor    = (double) skip + (skipReal - (double) skip);
+        v.grainClock = 0;
+        v.grains[0] = Voice::Grain {};
+        v.grains[1] = Voice::Grain { true, v.cursor, grainLen / 2 };   // starts at full weight, the first hop adds the next grain
+        v.state = Voice::State::Playing;
+    }
+    else
+    {
+        popFrames (v, nullptr, (int) skip);
+        float three[3] {};
+        popFrames (v, three, 3);
+        v.h[0] = three[0];                               // no earlier frame is known: repeat the first one
+        v.h[1] = three[0];
+        v.h[2] = three[1];
+        v.h[3] = three[2];
+        v.phase = skipReal - (double) skip;
+        v.consumed = skip;
+        v.state = Voice::State::Playing;
+    }
 
     if (voiceIndex == ch.pending)
     {
@@ -509,6 +529,140 @@ void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int6
     v.h[2] = s[k + 2];
     v.h[3] = s[k + 3];
     v.consumed += k;
+
+    if (v.level <= 0.0f && v.levelTarget <= 0.0f)
+        setIdle (v);
+}
+
+// 90s mode: lo-fi granular time stretch. The cursor moves through the file at the advance rate (eff, in session samples of
+// path time); two Hann-windowed grains, half a grain apart, read the file at the pitch rate starting from the cursor. At
+// pitch 1x and advance 1x the grains line up exactly and the result is the plain file. With the advance frozen, the grains
+// keep replaying the same stretch of the file.
+void RadioEngine::renderVoiceGrain (Voice& v, float* out, int n, const Table& t, int64_t clock,
+                                    const float* eff, double sumEff, const float* pitch, bool cubic,
+                                    float chanGain0, float chanGain1, bool linearFade) noexcept
+{
+    const double newCursor = v.cursor + v.step * sumEff;
+    const int64_t pops = (int64_t) std::floor (newCursor) - v.consumed;
+
+    if (pops < 0 || pops > (int64_t) scratch.size() || v.fifo.getNumReady() < (int) pops)
+    {
+        underruns.fetch_add (1);
+
+        if (v.levelTarget > 0.0f && v.sig.station >= 0)
+            requestVoice (v, v.sig, t, clock, v.fadeInc);
+        else
+            setIdle (v);
+        return;
+    }
+
+    // Where the frames that are still in the FIFO start (peeked, not consumed).
+    const int ready = v.fifo.getNumReady();
+    int s0 = 0;
+    if (ready > 0)
+    {
+        int s1, n1, s2, n2;
+        v.fifo.prepareToRead (ready, s1, n1, s2, n2);
+        s0 = s1;
+    }
+
+    const int64_t consumed = v.consumed;
+    const int64_t histStart = v.histStart;
+    const float* data = v.data.data();
+    const float* hist = v.hist.data();
+
+    auto fetch = [&] (int64_t a) -> float
+    {
+        if (a < histStart)
+            a = histStart;
+        if (a >= consumed)
+        {
+            const int64_t o = a - consumed;
+            return o < (int64_t) ready ? data[(size_t) ((s0 + o) & (kFifoFrames - 1))] : 0.0f;
+        }
+        if (a >= consumed - (int64_t) kHistFrames)
+            return hist[(size_t) (a & (kHistFrames - 1))];
+        return 0.0f;
+    };
+
+    const bool fading = std::fabs (v.level - v.levelTarget) > 0.0f;
+    float level = v.level;
+    const float target = v.levelTarget;
+    const float inc = v.levelInc;
+    const float dir = target > level ? 1.0f : -1.0f;
+    const float chanStep = (chanGain1 - chanGain0) / (float) n;
+    float chanGain = chanGain0;
+
+    const int hop = grainLen / 2;
+    double cursor = v.cursor;
+
+    for (int i = 0; i < n; ++i)
+    {
+        if (v.grainClock % hop == 0)                      // a new grain every half grain, starting at the cursor
+            v.grains[(v.grainClock / hop) & 1] = Voice::Grain { true, cursor, 0 };
+        v.grainClock = (v.grainClock + 1) % (hop * 2);
+
+        const double pitchStep = v.step * (double) pitch[i];
+        float sample = 0.0f;
+
+        for (auto& g : v.grains)
+        {
+            if (! g.on)
+                continue;
+
+            const int64_t ip = (int64_t) std::floor (g.pos);
+            const float f = (float) (g.pos - (double) ip);
+            float y;
+
+            if (cubic)
+            {
+                const float y0 = fetch (ip - 1), y1 = fetch (ip), y2 = fetch (ip + 1), y3 = fetch (ip + 2);
+                const float a = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
+                const float b = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+                const float c = -0.5f * y0 + 0.5f * y2;
+                y = ((a * f + b) * f + c) * f + y1;
+            }
+            else
+            {
+                y = fetch (ip);                                   // zero-order hold
+            }
+
+            sample += y * grainWin[(size_t) g.k];
+            g.pos += pitchStep;
+            if (++g.k >= grainLen)
+                g.on = false;
+        }
+
+        cursor += v.step * (double) eff[i];
+
+        float gn;
+        if (fading)
+        {
+            level += dir * inc;
+            if ((dir > 0.0f && level >= target) || (dir < 0.0f && level <= target))
+                level = target;
+            gn = linearFade ? level : std::sin (level * juce::MathConstants<float>::halfPi);
+        }
+        else
+        {
+            gn = (level >= 1.0f) ? 1.0f : 0.0f;
+        }
+
+        chanGain += chanStep;
+        out[i] += sample * gn * chanGain;
+    }
+
+    // Keep the frames that were just passed so grains can still read them, then release them from the FIFO.
+    if (pops > 0)
+    {
+        popFrames (v, scratch.data(), (int) pops);
+        for (int64_t j = 0; j < pops; ++j)
+            v.hist[(size_t) ((consumed + j) & (kHistFrames - 1))] = scratch[(size_t) j];
+        v.consumed = consumed + pops;
+    }
+
+    v.cursor = cursor;
+    v.level = level;
 
     if (v.level <= 0.0f && v.levelTarget <= 0.0f)
         setIdle (v);
@@ -664,13 +818,21 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     const bool cubic = ! p.grit;
 
     // Speed. Tape: percent of original speed (negative = backwards). Notes: semitones (whole semitones if quantised).
-    // 90s mode is not implemented yet and plays at original speed.
+    // 90s: pitch and advance rate are separate (and the mode is not available with the Soft and Radio tuners: Tape is used then).
+    const int speedMode = (p.speedMode == Speed90s && p.tunerMode != TunerSharp) ? (int) SpeedTape : p.speedMode;
+    grainNow = speedMode == Speed90s;
+
     double speedTarget = 1.0;
-    if (p.speedMode == SpeedTape)
+    const double pitchTarget = juce::jlimit (-kMaxSpeed, kMaxSpeed, (double) p.speedTape / 100.0);
+    if (speedMode == SpeedTape)
     {
-        speedTarget = juce::jlimit (-kMaxSpeed, kMaxSpeed, (double) p.speedTape / 100.0);
+        speedTarget = pitchTarget;
     }
-    else if (p.speedMode == SpeedNotes)
+    else if (grainNow)
+    {
+        speedTarget = juce::jlimit (0.0, kMaxSpeed, (double) p.advance90 / 100.0);
+    }
+    else if (speedMode == SpeedNotes)
     {
         double st = juce::jlimit (-48.0, 24.0, (double) p.speedNotes);
         if (p.quantisePitch)
@@ -685,7 +847,7 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     }
 
     const double speedAlpha = 1.0 - std::exp (-1.0 / (kSpeedSmoothSeconds * sr));
-    const double pauseInc = 1.0 / ((p.speedMode == SpeedNotes ? kNotesPauseSeconds : kPauseSlewSeconds) * sr);
+    const double pauseInc = 1.0 / ((speedMode == SpeedNotes ? kNotesPauseSeconds : kPauseSlewSeconds) * sr);
     const double pauseTarget = p.paused ? 0.0 : 1.0;
 
     // Grit mode: output rate and filter.
@@ -829,7 +991,8 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
         domFile = file[domChan];
 
         // Playing backwards needs a voice that reads the path backwards: switch once the speed has crossed zero.
-        if (curDir > 0 && speedSm < -0.002)       curDir = -1;
+        if (grainNow)                              curDir = 1;       // 90s mode never plays the file backwards (the pitch does)
+        else if (curDir > 0 && speedSm < -0.002)   curDir = -1;
         else if (curDir < 0 && speedSm > 0.002)   curDir = 1;
 
         for (int c = 0; c < 2; ++c)
@@ -861,11 +1024,13 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
             else if (pauseMul > pauseTarget) pauseMul = std::max (pauseTarget, pauseMul - pauseInc);
 
             speedSm += (speedTarget - speedSm) * speedAlpha;
+            pitchSm += (pitchTarget - pitchSm) * speedAlpha;
+            pitchArr[(size_t) i] = (float) pitchSm;
 
             const double e = speedSm * pauseMul;
             effPos[(size_t) i] = (float) std::max (0.0, e);
             effNeg[(size_t) i] = (float) std::max (0.0, -e);
-            gainPos[(size_t) i] = std::min (1.0f, effPos[(size_t) i] * 20.0f);
+            gainPos[(size_t) i] = grainNow ? 1.0f : std::min (1.0f, effPos[(size_t) i] * 20.0f);   // 90s keeps sounding when the advance stops
             gainNeg[(size_t) i] = std::min (1.0f, effNeg[(size_t) i] * 20.0f);
             sumPos += (double) effPos[(size_t) i];
             sumNeg += (double) effNeg[(size_t) i];
@@ -888,6 +1053,10 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
 
                 if (v.step * kMaxSpeed > kMaxStep * kMaxSpeed || v.step <= 0.0)
                     setIdle (v);
+                else if (v.sig.dir > 0 && v.grain != grainNow)      // 90s mode switched on or off: join again in the other engine
+                    requestVoice (v, v.sig, t, clock, v.fadeInc);
+                else if (v.sig.dir > 0 && v.grain)
+                    renderVoiceGrain (v, out + done, n, t, clock, effPos.data(), sumPos, pitchArr.data(), cubic, g0, g1, linearFade);
                 else if (v.sig.dir > 0)
                     renderVoice (v, out + done, n, t, clock, effPos.data(), sumPos, gainPos.data(), cubic, g0, g1, linearFade);
                 else

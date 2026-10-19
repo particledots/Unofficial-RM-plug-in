@@ -119,6 +119,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout RadioMusicProcessor::createL
     // Milestone 4. Banks 0 to 15 (root folders named with a leading number).
     layout.add (std::make_unique<AudioParameterInt> (ParameterID { "bank", 1 }, "Bank", 0, 15, 0));
 
+    // Milestone 6. '90s mode: the speed knob is the pitch (speedTape) and this is how fast the file moves forward.
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "advance90", 1 }, "Advance rate ('90s)",
+        NormalisableRange<float> (0.0f, 400.0f, 0.0f), 100.0f,
+        AudioParameterFloatAttributes().withLabel ("%")));
+
     // Milestone 5. Tuner modes, fade curve and the radio-mode settings (names follow the documented settings.txt keys).
     layout.add (std::make_unique<AudioParameterChoice> (
         ParameterID { "tunerMode", 1 }, "Tuner mode",
@@ -173,6 +179,7 @@ RadioMusicProcessor::RadioMusicProcessor()
     whistleParam   = apvts.getRawParameterValue ("whistleVol");
     strengthParam  = apvts.getRawParameterValue ("radioStrength");
     ssbParam       = apvts.getRawParameterValue ("ssbEffect");
+    advanceParam   = apvts.getRawParameterValue ("advance90");
 
     startTimerHz (10);
 }
@@ -197,7 +204,14 @@ void RadioMusicProcessor::prepareToPlay (double sampleRate, int)
 void RadioMusicProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
-    midi.clear();   // MIDI is not used yet (planned for a later milestone)
+    // MIDI: a note-on for note 36 (C1 in Logic) is a Reset, like the button. Nothing else is used.
+    for (const auto meta : midi)
+    {
+        const auto msg = meta.getMessage();
+        if (msg.isNoteOn() && msg.getNoteNumber() == kResetNote)
+            engine.requestReset();
+    }
+    midi.clear();
 
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
@@ -216,6 +230,7 @@ void RadioMusicProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     p.speedMode   = juce::jlimit (0, 2, (int) std::lround (speedModeParam->load()));
     p.speedTape   = speedTapeParam->load();
     p.speedNotes  = speedNotesParam->load();
+    p.advance90   = advanceParam->load();
     p.quantisePitch = quantiseParam->load() > 0.5f;
     p.grit        = gritParam->load() > 0.5f;
     p.bank        = juce::jlimit (0, rm::kNumBanks - 1, (int) std::lround (bankParam->load()));

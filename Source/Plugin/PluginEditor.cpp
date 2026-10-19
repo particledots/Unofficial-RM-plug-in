@@ -583,6 +583,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
       noiseKnob ("NOISE",     [] (double v) { return juce::String (std::lround (v)); }),
       whistleKnob ("WHISTLE", [] (double v) { return juce::String (std::lround (v)); }),
       strengthKnob ("STRENGTH", [] (double v) { return juce::String (std::lround (v * 100.0 / 256.0)) + "%"; }),
+      advanceKnob ("ADVANCE",  [] (double v) { return juce::String (std::lround (v)) + "%"; }),
       resetButton ("RESET", rmui::RmButton::Style::Round),
       pauseButton ("PAUSE", rmui::RmButton::Style::Pill),
       hostSyncButton ("HOST SYNC", rmui::RmButton::Style::Pill),
@@ -604,6 +605,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
       noiseAttach     (p.apvts, "noiseVol",      noiseKnob),
       whistleAttach   (p.apvts, "whistleVol",    whistleKnob),
       strengthAttach  (p.apvts, "radioStrength", strengthKnob),
+      advanceAttach   (p.apvts, "advance90",     advanceKnob),
       pauseAttach      (p.apvts, "pause",          pauseButton),
       hostSyncAttach   (p.apvts, "hostSync",       hostSyncButton),
       radioStartAttach (p.apvts, "radioStart",     radioStartButton),
@@ -620,7 +622,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
              &dial, &startKnob, &endKnob, &crossfadeKnob, &volumeKnob, &resetButton, &pauseButton,
              &hostSyncButton, &radioStartButton, &immediateButton, &folderButton, &rescanButton, &loopSelector,
              &speedKnob, &speedModeSelector, &quantiseButton, &gritButton, &bankStepper,
-             &tunerSelector, &fadeSelector, &noiseKnob, &whistleKnob, &strengthKnob, &ssbButton })
+             &tunerSelector, &fadeSelector, &noiseKnob, &whistleKnob, &strengthKnob, &ssbButton, &advanceKnob })
         addAndMakeVisible (c);
 
     startKnob.setDoubleClickReturnValue (true, 0.0);
@@ -630,6 +632,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     noiseKnob.setDoubleClickReturnValue (true, 50.0);
     whistleKnob.setDoubleClickReturnValue (true, 50.0);
     strengthKnob.setDoubleClickReturnValue (true, 128.0);
+    advanceKnob.setDoubleClickReturnValue (true, 100.0);
 
     speedModeWatcher.sendInitialUpdate();
     tunerWatcher.sendInitialUpdate();
@@ -642,7 +645,7 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     addHint (dial,             "Drag along the dial (or use the mouse wheel) to tune. Each audio file in the folder is a station, in file-name order.");
     addHint (startKnob,        "Where playback starts, and the left edge of the loop. Takes effect on RESET unless START NOW is on. If START is right of END, the loop plays in reverse.");
     addHint (endKnob,          "The right edge of the loop. START at far left with END at either edge plays the whole file.");
-    addHint (resetButton,      "Restart the tuned station from START.");
+    addHint (resetButton,      "Restart the tuned station from START. A MIDI note-on for note 36 (C1) does the same.");
     addHint (crossfadeKnob, [this]() -> juce::String
     {
         if (tunerMode == 1) return "Not used in SOFT mode: stations blend with the dial instead of by time. Switch to SHARP or RADIO to use it.";
@@ -656,14 +659,16 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     addHint (ssbButton,        "RADIO mode: a ring-modulation style frequency shift on stations that are not exactly tuned. It fades away as you tune onto the station.");
     addHint (volumeKnob,       "Output level. Double-click to reset to 0 dB.");
     addHint (loopSelector,     "OFF: stop at the end of the loop until RESET or retuning. LOOP: repeat. PING-PONG: forwards, then backwards.");
-    addHint (pauseButton,      "Tape-style stop: the speed slows to zero and the sound fades out, then picks up again when released. In NOTES mode it stops almost at once.");
+    addHint (pauseButton,      "Tape-style stop: the speed slows to zero and the sound fades out, then picks up again when released. In NOTES mode it stops almost at once. In '90s mode the advance freezes but the sound keeps playing.");
     addHint (speedKnob, [this]() -> juce::String
     {
         if (speedMode == 1) return "Pitch in semitones (-48 to +24). Only the tuned station changes pitch; other stations keep running at normal speed. Double-click for 0.";
-        if (speedMode == 2) return "'90s mode is not available yet: the plug-in plays at original speed.";
+        if (effectiveSpeedMode() == 2) return "'90s mode: the pitch of the sound, as a percent of original (100% = normal, negative = backwards). How fast the file moves forward is set by ADVANCE. Double-click for 100%.";
+        if (speedMode == 2) return "'90s mode is only available with the SHARP tuner, so TAPE speed is used. Switch the tuner to SHARP to use it.";
         return "Playback speed as a percent of original (100% = normal, 0% = stopped, negative plays backwards, up to 400%). Only the tuned station changes speed; other stations keep running at normal speed. Double-click for 100%.";
     });
-    addHint (speedModeSelector, "TAPE: smooth speed control, through zero into reverse. NOTES: pitch in semitones. '90s: not available yet (plays at original speed).");
+    addHint (speedModeSelector, "TAPE: smooth speed control, through zero into reverse. NOTES: pitch in semitones. '90s: a lo-fi time stretch where pitch and the rate the file moves forward are separate (SHARP tuner only).");
+    addHint (advanceKnob,      "'90s mode: how fast the file moves forward, as a percent of normal (0% freezes it, 100% = normal, up to 400%), independent of the pitch. Pause also freezes it. Double-click for 100%.");
     addHint (quantiseButton,   "Only works in NOTES mode. On: the pitch knob moves in whole semitones (equal temperament). Off: continuous pitch, so you can slide between notes.");
     addHint (gritButton,       "Low-fi sound: 8-bit, about 20 kHz, no smoothing between samples, softened by a post-DAC filter. Off is clean cubic interpolation.");
     addHint (radioStartButton, "ON: every file keeps playing in the background, like tuning a radio. OFF: a station restarts from START when you tune to it.");
@@ -695,6 +700,18 @@ void RadioMusicPanel::addHint (juce::Component& c, std::function<juce::String()>
 void RadioMusicPanel::applySpeedMode (int mode)
 {
     speedMode = mode;
+    refreshSpeedUi();
+}
+
+// '90s mode is only available with the Sharp tuner; with Soft or Radio the plug-in uses Tape speed.
+int RadioMusicPanel::effectiveSpeedMode() const noexcept
+{
+    return (speedMode == 2 && tunerMode != 0) ? 0 : speedMode;
+}
+
+void RadioMusicPanel::refreshSpeedUi()
+{
+    const int mode = effectiveSpeedMode();
     speedAttach.reset();
 
     if (mode == 1)
@@ -712,12 +729,14 @@ void RadioMusicPanel::applySpeedMode (int mode)
     else
     {
         speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (processor.apvts, "speedTape", speedKnob);
-        speedKnob.setCaption ("SPEED");
+        speedKnob.setCaption (mode == 2 ? "PITCH" : "SPEED");
         speedKnob.setDoubleClickReturnValue (true, 100.0);
-        speedKnob.setFormatter ([mode] (double v) { return mode == 2 ? juce::String ("1x") : juce::String (std::lround (v)) + "%"; });
+        speedKnob.setFormatter ([] (double v) { return juce::String (std::lround (v)) + "%"; });
     }
 
-    speedKnob.setEnabled (mode != 2);
+    speedKnob.setEnabled (true);
+    quantiseButton.setVisible (mode != 2);
+    advanceKnob.setVisible (mode == 2);
     quantiseButton.setEnabled (mode == 1);
     updateSnap();
     repaint();
@@ -726,6 +745,7 @@ void RadioMusicPanel::applySpeedMode (int mode)
 void RadioMusicPanel::applyTunerMode (int mode)
 {
     tunerMode = mode;
+    refreshSpeedUi();
     const bool radio = mode == 2;
 
     for (juce::Component* c : std::initializer_list<juce::Component*> { &noiseKnob, &whistleKnob, &strengthKnob, &ssbButton })
@@ -780,6 +800,7 @@ void RadioMusicPanel::resized()
     speedModeSelector.setBounds (Rectangle<int> (326, 314, 206, 24));
     speedKnob.setBounds     (Rectangle<int> (332, ky, kw, kh));
     quantiseButton.setBounds (Rectangle<int> (436, ky + 28, 96, 24));
+    advanceKnob.setBounds   (Rectangle<int> (436, ky, kw, kh));
 
     crossfadeKnob.setBounds (Rectangle<int> (556, ky, kw, kh));
     volumeKnob.setBounds    (Rectangle<int> (644, ky, kw, kh));

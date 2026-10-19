@@ -10,7 +10,7 @@ in the background when you tune away, so tuning back finds them further along.
 > This project is **not affiliated with, endorsed by or supported by** Music Thing Modular or Plus Minus Audio.
 > Please support the real thing: <https://www.musicthing.co.uk/Radio-Music/>
 
-## Status: milestone 5
+## Status: milestone 6
 
 Works now:
 - Choose a folder of WAV / AIFF / `.raw` files. Each file is a station (sorted by file name). `.raw` files are read as
@@ -39,14 +39,17 @@ Works now:
   a **Reset** button (and automatable Reset parameter), **Pause** and **radio start** on/off.
 - **Speed**: tape mode (-400% to +400%, through zero into reverse) and notes mode (-48 to +24 semitones, quantised to
   semitones by default). Speed changes only the tuned station; other stations keep advancing at normal speed.
-  The '90s mode is not available yet (it plays at original speed).
+  **'90s mode** (Sharp tuner only, as on the hardware) is a lo-fi granular time stretch: the PITCH knob and an ADVANCE
+  knob (how fast the file moves forward, 0 to 400%) are separate, and Pause freezes the advance while the sound keeps
+  playing. With the Soft or Radio tuner, Tape speed is used instead.
+- **MIDI**: a note-on for note 36 (C1) triggers Reset, like the button. Nothing else is mapped.
 - **Cubic interpolation** for clean pitch changes and sample-rate conversion, or **grit mode**
   (8-bit, about 20 kHz, zero-order hold, with a post-DAC filter).
 - Files at any supported sample rate are played at the right speed in the session rate.
 - Long files are streamed from disk, never loaded into memory.
 - A tuning-dial user interface with hover help for every control.
 
-Not yet (planned milestones): '90s mode (which the hardware does not offer with the Soft and Radio tuner modes), MIDI control.
+Not yet (planned): final polish, About text and release notes.
 
 ## How it was made (clean room)
 

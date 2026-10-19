@@ -74,6 +74,8 @@ public:
     // settings.txt values that have no knob: they always follow the files on disk.
     int  getStartDivider() const noexcept { return startDividerSetting.load(); }
 
+    static constexpr int kResetNote = 36;   // MIDI note that triggers Reset (C1 in Logic's naming)
+
     // Restarts the tuned station from START (the Reset button). Safe from the message thread.
     void triggerReset() { engine.requestReset(); }
 
@@ -118,6 +120,7 @@ private:
     std::atomic<float>* whistleParam   = nullptr;
     std::atomic<float>* strengthParam  = nullptr;
     std::atomic<float>* ssbParam       = nullptr;
+    std::atomic<float>* advanceParam   = nullptr;
 
     std::atomic<int>  startDividerSetting { rm::kStartDivider };   // startCVDivider from settings.txt
     std::atomic<bool> reselectSetting { false };                    // reselectSubdirOnStationChange from settings.txt
