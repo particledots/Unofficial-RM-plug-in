@@ -101,6 +101,12 @@ jobs:
             echo "Download the **RadioMusicUnofficial-macOS** artifact at the bottom of this page."
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # The same results as annotations (these are readable by tools that cannot read the log).
+          echo "::notice title=Engine test::${{ steps.enginetest.outcome }} ($(grep -c '  ok:' enginetest.log 2>/dev/null || echo 0) checks ok, $(grep -c '  FAIL:' enginetest.log 2>/dev/null || echo 0) failed)"
+          echo "::notice title=auval::${{ steps.auval.outcome }} ($(grep -E 'AU VALIDATION (SUCCEEDED|FAILED)' auval.log 2>/dev/null | head -1 || echo 'no verdict line'))"
+          echo "::notice title=Architectures::AU: $(lipo -archs "$AU_PATH/Contents/MacOS/Radio Music Unofficial" 2>&1) | VST3: $(lipo -archs "$VST_PATH/Contents/MacOS/Radio Music Unofficial" 2>&1)"
+          echo "::notice title=Minimum macOS::$(otool -l "$AU_PATH/Contents/MacOS/Radio Music Unofficial" 2>&1 | grep -E 'minos' | sort -u | tr -s ' ' | tr '\n' ';')"
+
       - name: Upload the plug-ins
         uses: actions/upload-artifact@v7
         with:
