@@ -76,6 +76,10 @@ public:
     int      getDisplayedStation() const noexcept  { return uiStation.load(); }   // slot on the dial in this bank, -1 = none
     int      getDisplayedFile() const noexcept     { return uiFile.load(); }      // index into Library::stations of the playing file, -1 = none
     int      getNumStations() const noexcept       { return uiCount.load(); }     // slots in this bank
+    // Diagnostics: Resets seen by the audio thread, Resets ignored (skipN), and subfolder file changes.
+    uint32_t getResetsApplied() const noexcept     { return diagApplied.load(); }
+    uint32_t getResetsIgnored() const noexcept     { return diagIgnored.load(); }
+    uint32_t getFileChanges() const noexcept       { return diagFileChanges.load(); }
     uint32_t getUnderrunCount() const noexcept     { return underruns.load(); }
     int64_t  getClockSamples() const noexcept      { return clockSamples.load(); }
     double   getClockSeconds() const noexcept      { return uiClockSeconds.load(); }
@@ -259,6 +263,7 @@ private:
     std::atomic<int64_t>  clockSamples { 0 };
     std::atomic<int>      uiStation { -1 };
     std::atomic<int>      uiFile    { -1 };
+    std::atomic<uint32_t> diagApplied { 0 }, diagIgnored { 0 }, diagFileChanges { 0 };
     std::atomic<int>      uiCount   { 0 };
     std::atomic<uint32_t> underruns { 0 };
     std::atomic<double>   uiClockSeconds { 0.0 };

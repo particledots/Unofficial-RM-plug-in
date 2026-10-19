@@ -1106,6 +1106,46 @@ static void testBanks (const juce::File& root)
     CHECK (std::fabs (a - b) > 0.05f, "with reselect on tune, tuning back to a subfolder picks its next file");
 }
 
+
+// Closer to a real folder: stereo 44.1 kHz files, loop mode off, a session at 48 kHz.
+static void testNextFolderRealistic (const juce::File& root)
+{
+    std::cout << "\n=== M4 realistic next folder ===\n";
+    auto bank = root.getChildFile ("0"); bank.createDirectory();
+    writeRamp (bank.getChildFile ("02 - one.wav"), 44100.0, 20.0, 16, 2);
+    writeRamp (bank.getChildFile ("03 - two.wav"), 44100.0, 20.0, 16, 2);
+    writeRamp (bank.getChildFile ("a skip2.wav"),  44100.0, 20.0, 16, 2);
+    auto nxt = bank.getChildFile ("loops next"); nxt.createDirectory();
+    writeRamp (nxt.getChildFile ("04 - x.wav"), 44100.0, 20.0, 16, 2);
+    writeRamp (nxt.getChildFile ("05 - y.wav"), 44100.0, 21.0, 16, 2);
+    writeRamp (nxt.getChildFile ("06 - z.wav"), 44100.0, 22.0, 16, 2);
+
+    auto lib = scanFolder (root);
+    CHECK (lib->banks.size() == 1 && lib->banks[0].numSlots == 4, "bank 0 has 4 slots");
+    if (lib->banks.empty()) return;
+
+    for (int mode : { LoopOff, LoopForward })
+    {
+        RadioEngine engine; engine.prepare (48000.0); engine.setLibrary (lib);
+        Runner r { engine, 48000.0, 1024 };
+        RadioEngine::Params p;
+        p.loopMode = mode; p.station = stationParam (3, 4); p.bank = 0;
+        r.run (1.0, p);
+        const int f0 = engine.getDisplayedFile();
+        CHECK (engine.getDisplayedStation() == 3, "tuned to the next folder (slot 4)");
+        int prev = f0;
+        for (int i = 0; i < 4; ++i)
+        {
+            engine.requestReset();
+            r.run (0.6, p);
+            const int f = engine.getDisplayedFile();
+            std::cout << "    loop mode " << mode << ", Reset " << (i + 1) << ": file " << prev << " -> " << f << "\n";
+            CHECK (f != prev, "Reset moves a next folder to a different file");
+            prev = f;
+        }
+    }
+}
+
 int main (int argc, char** argv)
 {
     auto root = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rm_engine_test");
@@ -1136,6 +1176,7 @@ int main (int argc, char** argv)
     writeRamp (two.getChildFile ("b.wav"), 48000.0, 10.0, 24, 1);
 
     root.getChildFile ("banks").createDirectory();
+    root.getChildFile ("real").createDirectory();
 
     auto sine = root.getChildFile ("sine"); sine.createDirectory();
     writeSine (sine.getChildFile ("sine.wav"), 44100.0, 10.0, 1000.0, 0.5f);
@@ -1144,6 +1185,7 @@ int main (int argc, char** argv)
     {
         testRules();
         testBanks (root.getChildFile ("banks"));
+        testNextFolderRealistic (root.getChildFile ("real"));
         root.deleteRecursively();
         std::cout << "\n" << (failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED: " + std::to_string (failures) + " check(s)") << "\n";
         return failures == 0 ? 0 : 1;

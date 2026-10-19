@@ -356,7 +356,7 @@ void DialDisplay::paint (juce::Graphics& g)
         for (const auto& sl : lib->slots)             // a subfolder shows as "folder / file"
             if (sl.mode != rm::SlotFile && fileIdx >= sl.firstFile && fileIdx < sl.firstFile + sl.numFiles)
             {
-                name = sl.name + "  /  " + name;
+                name = sl.name + "  /  " + name + "  (" + juce::String (fileIdx - sl.firstFile + 1) + "/" + juce::String (sl.numFiles) + ")";
                 break;
             }
 
@@ -855,11 +855,15 @@ void RadioMusicPanel::paint (juce::Graphics& g)
                 for (int i = b->firstSlot; i < b->firstSlot + b->numSlots; ++i)
                     files += lib->slots[(size_t) i].numFiles;
 
-                info = "Bank " + juce::String (bankNumber) + ": " + juce::String (b->numSlots) + " stations, " + juce::String (files) + " files.  ";
+                info = "Bank " + juce::String (bankNumber) + ": " + juce::String (b->numSlots) + " stations, " + juce::String (files) + " files. ";
                 if (lib->rootSettingsFound || b->ownSettingsFound)
-                    info += "settings.txt read: " + juce::String ((int) b->settings.size()) + " keys.";
+                    info += "settings.txt: " + juce::String ((int) b->settings.size()) + " keys.";
                 else
-                    info += "No settings.txt found.";
+                    info += "No settings.txt.";
+
+                const auto& eng = processor.getEngine();
+                info += "\nResets: " + juce::String ((int) eng.getResetsApplied()) + " done, " + juce::String ((int) eng.getResetsIgnored())
+                        + " skipped, " + juce::String ((int) eng.getFileChanges()) + " file changes";
             }
             else
                 info = "No bank " + juce::String (bankNumber) + " in this folder.  " + juce::String ((int) lib->banks.size()) + " banks found.";

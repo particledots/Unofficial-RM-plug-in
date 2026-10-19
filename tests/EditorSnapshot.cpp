@@ -80,6 +80,44 @@ int main (int argc, char** argv)
     RadioMusicProcessor proc;
     proc.prepareToPlay (48000.0, 512);
 
+    // Developer check of the whole plug-in object (parameters, settings, engine): Reset on a "next" subfolder.
+    if (argc > 2 && juce::String (argv[2]) == "resettest")
+    {
+        auto bank = root.getChildFile ("Radio Test").getChildFile ("0"); bank.createDirectory();
+        writeTone (bank.getChildFile ("02 one.wav"), 48000.0, 20.0, 220.0);
+        writeTone (bank.getChildFile ("03 two.wav"), 48000.0, 20.0, 330.0);
+        auto nxt = bank.getChildFile ("loops next"); nxt.createDirectory();
+        writeTone (nxt.getChildFile ("04 x.wav"), 48000.0, 20.0, 440.0);
+        writeTone (nxt.getChildFile ("05 y.wav"), 48000.0, 20.0, 550.0);
+        writeTone (nxt.getChildFile ("06 z.wav"), 48000.0, 20.0, 660.0);
+        root.getChildFile ("Radio Test").getChildFile ("settings.txt").replaceWithText ("loopMode = 0\n");
+
+        proc.setSampleFolder (root.getChildFile ("Radio Test"));
+        for (int i = 0; i < 100 && proc.getLibrary() == nullptr; ++i) juce::Thread::sleep (50);
+        auto lib = proc.getLibrary();
+        std::cout << "slots " << (lib ? (int) lib->slots.size() : -1) << " files " << (lib ? (int) lib->stations.size() : -1) << "\n";
+
+        // Bryn's screenshot: radio start off, 90s mode, 1 ms crossfade
+        if (argc > 3 && juce::String (argv[3]) == "bryn")
+        {
+            setParam (proc, "radioStart", 0.0f);
+            setParam (proc, "speedMode", 2.0f);
+            setParam (proc, "crossfade", 1.0f);
+            setParam (proc, "volume", -13.8f);
+        }
+        setParam (proc, "station", 0.9f);   // last of 3 slots
+        pump (proc, 1.0);
+        std::cout << "slot " << proc.getEngine().getDisplayedStation() << " of " << proc.getEngine().getNumStations()
+                  << " file " << proc.getEngine().getDisplayedFile() << "\n";
+        for (int i = 0; i < 4; ++i)
+        {
+            proc.triggerReset();
+            pump (proc, 0.6);
+            std::cout << "after reset " << i + 1 << ": file " << proc.getEngine().getDisplayedFile() << "\n";
+        }
+        return 0;
+    }
+
     // 1. empty state
     snap (proc, outDir.getChildFile ("1_no_folder.png"));
 

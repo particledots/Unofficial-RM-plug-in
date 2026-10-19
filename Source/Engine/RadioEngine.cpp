@@ -648,12 +648,17 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
             else if (skipLeft[(size_t) globalSlot] > 0)
             {
                 skipLeft[(size_t) globalSlot] -= 1;           // ignored
+                diagIgnored.fetch_add (1, std::memory_order_relaxed);
             }
             else
             {
                 latchedStart = startNow;
+                const int before = desiredStation;
                 reselect (globalSlot, t);
                 desiredStation = fileOfSlot (globalSlot);
+                diagApplied.fetch_add (1, std::memory_order_relaxed);
+                if (desiredStation != before)
+                    diagFileChanges.fetch_add (1, std::memory_order_relaxed);
                 refClock[(size_t) desiredStation] = (double) clock;
                 epochOf[(size_t) desiredStation] += 1;
                 skipLeft[(size_t) globalSlot] = (int) t.skip[(size_t) desiredStation];
