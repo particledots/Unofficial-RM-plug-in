@@ -580,6 +580,9 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
       crossfadeKnob ("CROSSFADE", [] (double v) { return formatCrossfade (v); }),
       volumeKnob ("VOLUME",   [] (double v) { return formatVolume (v); }),
       speedKnob ("SPEED",     [] (double v) { return juce::String (std::lround (v)) + "%"; }),
+      noiseKnob ("NOISE",     [] (double v) { return juce::String (std::lround (v)); }),
+      whistleKnob ("WHISTLE", [] (double v) { return juce::String (std::lround (v)); }),
+      strengthKnob ("STRENGTH", [] (double v) { return juce::String (std::lround (v * 100.0 / 256.0)) + "%"; }),
       resetButton ("RESET", rmui::RmButton::Style::Round),
       pauseButton ("PAUSE", rmui::RmButton::Style::Pill),
       hostSyncButton ("HOST SYNC", rmui::RmButton::Style::Pill),
@@ -589,34 +592,47 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
       rescanButton ("RESCAN", rmui::RmButton::Style::Flat),
       quantiseButton ("QUANTISE", rmui::RmButton::Style::Pill),
       gritButton ("GRIT", rmui::RmButton::Style::Pill),
+      ssbButton ("SSB EFFECT", rmui::RmButton::Style::Pill),
       loopSelector (*p.apvts.getParameter ("loopMode"), juce::StringArray { "OFF", "LOOP", "PING-PONG" }),
       speedModeSelector (*p.apvts.getParameter ("speedMode"), juce::StringArray { "TAPE", "NOTES", "'90s" }),
+      tunerSelector (*p.apvts.getParameter ("tunerMode"), juce::StringArray { "SHARP", "SOFT", "RADIO" }),
+      fadeSelector (*p.apvts.getParameter ("fadeMode"), juce::StringArray { "CONST POWER", "LINEAR" }),
       startAttach     (p.apvts, "start",     startKnob),
       endAttach       (p.apvts, "end",       endKnob),
       crossfadeAttach (p.apvts, "crossfade", crossfadeKnob),
       volumeAttach    (p.apvts, "volume",    volumeKnob),
+      noiseAttach     (p.apvts, "noiseVol",      noiseKnob),
+      whistleAttach   (p.apvts, "whistleVol",    whistleKnob),
+      strengthAttach  (p.apvts, "radioStrength", strengthKnob),
       pauseAttach      (p.apvts, "pause",          pauseButton),
       hostSyncAttach   (p.apvts, "hostSync",       hostSyncButton),
       radioStartAttach (p.apvts, "radioStart",     radioStartButton),
       immediateAttach  (p.apvts, "startImmediate", immediateButton),
       quantiseAttach   (p.apvts, "quantisePitch",  quantiseButton),
       gritAttach       (p.apvts, "gritMode",       gritButton),
-      speedModeWatcher (*p.apvts.getParameter ("speedMode"), [this] (float v) { applySpeedMode (juce::jlimit (0, 2, (int) std::lround (v))); })
+      ssbAttach        (p.apvts, "ssbEffect",      ssbButton),
+      speedModeWatcher (*p.apvts.getParameter ("speedMode"), [this] (float v) { applySpeedMode (juce::jlimit (0, 2, (int) std::lround (v))); }),
+      tunerWatcher     (*p.apvts.getParameter ("tunerMode"), [this] (float v) { applyTunerMode (juce::jlimit (0, 2, (int) std::lround (v))); })
 {
     setSize (RadioMusicEditor::kBaseWidth, RadioMusicEditor::kBaseHeight);
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &dial, &startKnob, &endKnob, &crossfadeKnob, &volumeKnob, &resetButton, &pauseButton,
              &hostSyncButton, &radioStartButton, &immediateButton, &folderButton, &rescanButton, &loopSelector,
-             &speedKnob, &speedModeSelector, &quantiseButton, &gritButton, &bankStepper })
+             &speedKnob, &speedModeSelector, &quantiseButton, &gritButton, &bankStepper,
+             &tunerSelector, &fadeSelector, &noiseKnob, &whistleKnob, &strengthKnob, &ssbButton })
         addAndMakeVisible (c);
 
     startKnob.setDoubleClickReturnValue (true, 0.0);
     endKnob.setDoubleClickReturnValue (true, 1.0);
     crossfadeKnob.setDoubleClickReturnValue (true, 25.0);
     volumeKnob.setDoubleClickReturnValue (true, 0.0);
+    noiseKnob.setDoubleClickReturnValue (true, 50.0);
+    whistleKnob.setDoubleClickReturnValue (true, 50.0);
+    strengthKnob.setDoubleClickReturnValue (true, 128.0);
 
     speedModeWatcher.sendInitialUpdate();
+    tunerWatcher.sendInitialUpdate();
 
     quantiseButton.onStateChange = [this] { updateSnap(); };
     resetButton.onClick  = [this] { processor.triggerReset(); resetButton.flash(); };
@@ -627,7 +643,17 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     addHint (startKnob,        "Where playback starts, and the left edge of the loop. Takes effect on RESET unless START NOW is on. If START is right of END, the loop plays in reverse.");
     addHint (endKnob,          "The right edge of the loop. START at far left with END at either edge plays the whole file.");
     addHint (resetButton,      "Restart the tuned station from START.");
-    addHint (crossfadeKnob,    "How long it takes to blend from one station to the next when you tune. Double-click to reset to 25 ms.");
+    addHint (crossfadeKnob, [this]() -> juce::String
+    {
+        if (tunerMode == 1) return "Not used in SOFT mode: stations blend with the dial instead of by time. Switch to SHARP or RADIO to use it.";
+        return "How long it takes to blend from one station to the next when you tune (up to 60 seconds). Double-click to reset to 25 ms.";
+    });
+    addHint (tunerSelector,    "SHARP: one station at a time, with a crossfade between stations. SOFT: neighbouring stations blend smoothly as you move the dial, so two can play at once. RADIO: stations emerge from hiss, with a whistle as you tune in.");
+    addHint (fadeSelector,     "The shape of crossfades and of the SOFT blend. CONST POWER suits almost all audio. LINEAR suits correlated sounds such as wavetables and envelopes.");
+    addHint (noiseKnob,        "RADIO mode: how loud the hiss is. It fills the gaps between stations and fades out as a strong station comes in. Double-click for 50.");
+    addHint (whistleKnob,      "RADIO mode: the whistle that falls in pitch as you tune onto a station and disappears when you are exactly on it. Double-click for 50.");
+    addHint (strengthKnob,     "RADIO mode: how strong the weakest stations are. 100% = every station comes in at full strength. 0% = stations range from almost inaudible to full. Double-click for 50%.");
+    addHint (ssbButton,        "RADIO mode: a ring-modulation style frequency shift on stations that are not exactly tuned. It fades away as you tune onto the station.");
     addHint (volumeKnob,       "Output level. Double-click to reset to 0 dB.");
     addHint (loopSelector,     "OFF: stop at the end of the loop until RESET or retuning. LOOP: repeat. PING-PONG: forwards, then backwards.");
     addHint (pauseButton,      "Tape-style stop: the speed slows to zero and the sound fades out, then picks up again when released. In NOTES mode it stops almost at once.");
@@ -697,6 +723,18 @@ void RadioMusicPanel::applySpeedMode (int mode)
     repaint();
 }
 
+void RadioMusicPanel::applyTunerMode (int mode)
+{
+    tunerMode = mode;
+    const bool radio = mode == 2;
+
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &noiseKnob, &whistleKnob, &strengthKnob, &ssbButton })
+        c->setEnabled (radio);
+
+    crossfadeKnob.setEnabled (mode != 1);
+    repaint();
+}
+
 void RadioMusicPanel::updateSnap()
 {
     speedKnob.setSnapToWholeNumbers (speedMode == 1 && quantiseButton.getToggleState());
@@ -754,8 +792,16 @@ void RadioMusicPanel::resized()
     immediateButton.setBounds  (Rectangle<int> (rx, 406, rw, 24));
     gritButton.setBounds       (Rectangle<int> (rx, 434, rw, 24));
 
-    folderButton.setBounds (Rectangle<int> (24, 514, 120, 26));
-    rescanButton.setBounds (Rectangle<int> (150, 514, 70, 26));
+    // tuner panel: y 470..584
+    tunerSelector.setBounds (Rectangle<int> (44, 494, 206, 26));
+    fadeSelector.setBounds  (Rectangle<int> (44, 540, 206, 26));
+    noiseKnob.setBounds     (Rectangle<int> (332, 488, 88, 96));
+    whistleKnob.setBounds   (Rectangle<int> (424, 488, 88, 96));
+    strengthKnob.setBounds  (Rectangle<int> (516, 488, 88, 96));
+    ssbButton.setBounds     (Rectangle<int> (620, 520, 120, 24));
+
+    folderButton.setBounds (Rectangle<int> (24, 638, 120, 26));
+    rescanButton.setBounds (Rectangle<int> (150, 638, 70, 26));
 }
 
 void RadioMusicPanel::paint (juce::Graphics& g)
@@ -828,11 +874,33 @@ void RadioMusicPanel::paint (juce::Graphics& g)
         g.drawText ("PLAYBACK", juce::Rectangle<int> (754, 298, 140, 14), juce::Justification::centredLeft, false);
     }
 
+    // tuner panel
+    {
+        const auto panelRect = juce::Rectangle<float> (24.0f, 470.0f, (float) getWidth() - 48.0f, 114.0f);
+        g.setColour (panel);
+        g.fillRoundedRectangle (panelRect, 14.0f);
+        g.setColour (panelEdge);
+        g.drawRoundedRectangle (panelRect.reduced (0.5f), 14.0f, 1.5f);
+        g.drawLine (316.0f, 488.0f, 316.0f, 566.0f, 1.0f);
+        g.drawLine (750.0f, 488.0f, 750.0f, 566.0f, 1.0f);
+
+        g.setColour (dim);
+        g.setFont (rmui::uiFont (9.5f, true));
+        g.drawText ("TUNER MODE", juce::Rectangle<int> (44, 476, 200, 14), juce::Justification::centredLeft, false);
+        g.drawText ("FADE CURVE", juce::Rectangle<int> (44, 524, 200, 14), juce::Justification::centredLeft, false);
+        g.drawText ("RADIO MODE", juce::Rectangle<int> (326, 476, 200, 14), juce::Justification::centredLeft, false);
+
+        g.setColour (dim.withAlpha (0.8f));
+        g.setFont (rmui::uiFont (10.5f));
+        g.drawFittedText ("Noise, whistle, strength and SSB only act in RADIO mode. In SOFT mode the crossfade time is not used.",
+                          juce::Rectangle<int> (762, 492, 140, 70), juce::Justification::topLeft, 5);
+    }
+
     // hint line
     g.setColour (currentHint.isEmpty() ? dim.withAlpha (0.55f) : cream.withAlpha (0.9f));
     g.setFont (rmui::uiFont (14.5f));
     g.drawFittedText (currentHint.isEmpty() ? juce::String ("Hover over a control to see what it does.") : currentHint,
-                      juce::Rectangle<int> (28, 466, getWidth() - 56, 44), juce::Justification::centredLeft, 2, 0.9f);
+                      juce::Rectangle<int> (28, 590, getWidth() - 56, 44), juce::Justification::centredLeft, 2, 0.9f);
 
     // folder path
     {
@@ -841,7 +909,7 @@ void RadioMusicPanel::paint (juce::Graphics& g)
         const auto font = rmui::uiFont (11.0f);
         g.setColour (dim);
         g.setFont (font);
-        g.drawText (rmui::fitTail (text, font, 270.0f), juce::Rectangle<int> (230, 510, 280, 18), juce::Justification::centredLeft, false);
+        g.drawText (rmui::fitTail (text, font, 270.0f), juce::Rectangle<int> (230, 634, 280, 18), juce::Justification::centredLeft, false);
 
         // what the plug-in found in the folder
         juce::String info;
@@ -871,7 +939,7 @@ void RadioMusicPanel::paint (juce::Graphics& g)
 
         g.setFont (rmui::uiFont (10.0f));
         g.setColour (rmui::colours::dim.withAlpha (0.8f));
-        g.drawFittedText (info, juce::Rectangle<int> (230, 528, 280, 26), juce::Justification::topLeft, 2);
+        g.drawFittedText (info, juce::Rectangle<int> (230, 652, 280, 26), juce::Justification::topLeft, 2);
     }
 
     // credits
@@ -880,7 +948,7 @@ void RadioMusicPanel::paint (juce::Graphics& g)
     g.drawFittedText ("Unofficial plug-in inspired by Radio Music mk2 by Music Thing Modular, designed by Tom Whitwell with Chris Johnson "
                       "of Plus Minus Audio. Not affiliated with or endorsed by Music Thing Modular. Open source (AGPLv3); clean-room "
                       "implementation from the published documentation. Buffer underruns: " + juce::String ((int) processor.getEngine().getUnderrunCount()),
-                      juce::Rectangle<int> (520, 508, getWidth() - 24 - 520, 40), juce::Justification::centredRight, 4);
+                      juce::Rectangle<int> (520, 632, getWidth() - 24 - 520, 40), juce::Justification::centredRight, 4);
 }
 
 void RadioMusicPanel::chooseFolder()
@@ -913,7 +981,7 @@ void RadioMusicPanel::timerCallback()
     resetButton.tick();
     dial.repaint();
     repaint (juce::Rectangle<int> (0, 0, getWidth(), 66));
-    repaint (juce::Rectangle<int> (0, 506, getWidth(), 54));
+    repaint (juce::Rectangle<int> (0, 630, getWidth(), 54));
 }
 
 

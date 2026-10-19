@@ -112,6 +112,12 @@ private:
     std::atomic<float>* quantiseParam  = nullptr;
     std::atomic<float>* gritParam      = nullptr;
     std::atomic<float>* bankParam      = nullptr;
+    std::atomic<float>* tunerParam     = nullptr;
+    std::atomic<float>* fadeParam      = nullptr;
+    std::atomic<float>* noiseParam     = nullptr;
+    std::atomic<float>* whistleParam   = nullptr;
+    std::atomic<float>* strengthParam  = nullptr;
+    std::atomic<float>* ssbParam       = nullptr;
 
     std::atomic<int>  startDividerSetting { rm::kStartDivider };   // startCVDivider from settings.txt
     std::atomic<bool> reselectSetting { false };                    // reselectSubdirOnStationChange from settings.txt

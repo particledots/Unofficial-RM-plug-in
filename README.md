@@ -10,7 +10,7 @@ in the background when you tune away, so tuning back finds them further along.
 > This project is **not affiliated with, endorsed by or supported by** Music Thing Modular or Plus Minus Audio.
 > Please support the real thing: <https://www.musicthing.co.uk/Radio-Music/>
 
-## Status: milestone 4
+## Status: milestone 5
 
 Works now:
 - Choose a folder of WAV / AIFF / `.raw` files. Each file is a station (sorted by file name). `.raw` files are read as
@@ -23,8 +23,15 @@ Works now:
 - **`skipN`**: a file whose name ends in `skipN` (N from 1 to 255) makes the next N resets be ignored while it plays.
 - **`settings.txt`**: a `settings.txt` in the folder (and per-bank files that override it) sets the starting values of the
   matching knobs when you choose the folder or change bank. Understood keys: `speedMode`, `quantisePitchPot`, `loopMode`,
-  `radioStart`, `crossfadeTime`, `highQuality`, `startPotImmediate`, plus `startCVDivider` and
-  `reselectSubdirOnStationChange`, which always follow the file. All other documented keys are ignored for now.
+  `radioStart`, `crossfadeTime`, `highQuality`, `startPotImmediate`, `tunerMode`, `fadeMode`, `noiseVol`, `whistleVol`,
+  `minRadioStationStrength` and `ssbEffect`, plus `startCVDivider` and `reselectSubdirOnStationChange`, which always
+  follow the file. All other documented keys are ignored for now.
+- **Tuner modes**: *Sharp* (one station at a time, crossfading between stations over the crossfade time), *Soft*
+  (neighbouring stations blend continuously as you move the dial; two can play at once; the crossfade time is not
+  used) and *Radio* (stations emerge from hiss; a whistle drops in pitch as you tune onto a station; adjustable noise,
+  whistle, minimum station strength and an SSB-style ring-modulation effect). A **fade curve** setting chooses
+  constant-power or linear shapes for crossfades and the Soft blend. The documentation says little about these modes,
+  so the curves are this plug-in's own choices (see the project notes).
 - A **Station** parameter (automatable) selects the file, with a crossfade (adjustable, 1 ms to 60 s).
 - A **radio clock**: every station has its own playhead derived from one clock, so a station you tuned
   away from has moved on when you tune back. Free-running by default, or **host sync** to follow the DAW position.
@@ -39,7 +46,7 @@ Works now:
 - Long files are streamed from disk, never loaded into memory.
 - A tuning-dial user interface with hover help for every control.
 
-Not yet (planned milestones): '90s mode, soft and radio tuner modes, MIDI control.
+Not yet (planned milestones): '90s mode (which the hardware does not offer with the Soft and Radio tuner modes), MIDI control.
 
 ## How it was made (clean room)
 

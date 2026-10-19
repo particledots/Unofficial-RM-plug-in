@@ -119,6 +119,29 @@ juce::AudioProcessorValueTreeState::ParameterLayout RadioMusicProcessor::createL
     // Milestone 4. Banks 0 to 15 (root folders named with a leading number).
     layout.add (std::make_unique<AudioParameterInt> (ParameterID { "bank", 1 }, "Bank", 0, 15, 0));
 
+    // Milestone 5. Tuner modes, fade curve and the radio-mode settings (names follow the documented settings.txt keys).
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "tunerMode", 1 }, "Tuner mode",
+        StringArray { "Sharp", "Soft", "Radio" }, 0));
+
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "fadeMode", 1 }, "Fade curve",
+        StringArray { "Constant power", "Linear" }, 0));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "noiseVol", 1 }, "Radio noise",
+        NormalisableRange<float> (0.0f, 100.0f, 1.0f), 50.0f));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "whistleVol", 1 }, "Radio whistle",
+        NormalisableRange<float> (0.0f, 100.0f, 1.0f), 50.0f));
+
+    layout.add (std::make_unique<AudioParameterFloat> (
+        ParameterID { "radioStrength", 1 }, "Radio minimum strength",
+        NormalisableRange<float> (0.0f, 256.0f, 1.0f), 128.0f));
+
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "ssbEffect", 1 }, "Radio SSB effect", false));
+
     return layout;
 }
 
@@ -144,6 +167,12 @@ RadioMusicProcessor::RadioMusicProcessor()
     quantiseParam  = apvts.getRawParameterValue ("quantisePitch");
     gritParam      = apvts.getRawParameterValue ("gritMode");
     bankParam      = apvts.getRawParameterValue ("bank");
+    tunerParam     = apvts.getRawParameterValue ("tunerMode");
+    fadeParam      = apvts.getRawParameterValue ("fadeMode");
+    noiseParam     = apvts.getRawParameterValue ("noiseVol");
+    whistleParam   = apvts.getRawParameterValue ("whistleVol");
+    strengthParam  = apvts.getRawParameterValue ("radioStrength");
+    ssbParam       = apvts.getRawParameterValue ("ssbEffect");
 
     startTimerHz (10);
 }
@@ -190,6 +219,12 @@ void RadioMusicProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     p.quantisePitch = quantiseParam->load() > 0.5f;
     p.grit        = gritParam->load() > 0.5f;
     p.bank        = juce::jlimit (0, rm::kNumBanks - 1, (int) std::lround (bankParam->load()));
+    p.tunerMode   = juce::jlimit (0, 2, (int) std::lround (tunerParam->load()));
+    p.fadeMode    = juce::jlimit (0, 1, (int) std::lround (fadeParam->load()));
+    p.noiseVol    = noiseParam->load();
+    p.whistleVol  = whistleParam->load();
+    p.minStrength = juce::jlimit (0, 256, (int) std::lround (strengthParam->load()));
+    p.ssb         = ssbParam->load() > 0.5f;
     p.startDivider = startDividerSetting.load (std::memory_order_relaxed);
     p.reselectOnTune = reselectSetting.load (std::memory_order_relaxed);
 
@@ -304,6 +339,12 @@ void RadioMusicProcessor::applyBankSettings (const rm::Library& lib, int bankNum
     if (hasSetting (s, "crossfadeTime"))   setParameterValue ("crossfade", (float) juce::jlimit (1, 60000, settingOr (s, "crossfadeTime", 25)));
     if (hasSetting (s, "highQuality"))     setParameterValue ("gritMode", settingOr (s, "highQuality", 1) != 0 ? 0.0f : 1.0f);
     if (hasSetting (s, "startPotImmediate")) setParameterValue ("startImmediate", settingOr (s, "startPotImmediate", 0) != 0 ? 1.0f : 0.0f);
+    if (hasSetting (s, "tunerMode"))       setParameterValue ("tunerMode", (float) juce::jlimit (0, 2, settingOr (s, "tunerMode", 0)));
+    if (hasSetting (s, "fadeMode"))        setParameterValue ("fadeMode", settingOr (s, "fadeMode", 0) != 0 ? 1.0f : 0.0f);
+    if (hasSetting (s, "noiseVol"))        setParameterValue ("noiseVol", (float) juce::jlimit (0, 100, settingOr (s, "noiseVol", 50)));
+    if (hasSetting (s, "whistleVol"))      setParameterValue ("whistleVol", (float) juce::jlimit (0, 100, settingOr (s, "whistleVol", 50)));
+    if (hasSetting (s, "minRadioStationStrength")) setParameterValue ("radioStrength", (float) juce::jlimit (0, 256, settingOr (s, "minRadioStationStrength", 128)));
+    if (hasSetting (s, "ssbEffect"))       setParameterValue ("ssbEffect", settingOr (s, "ssbEffect", 0) != 0 ? 1.0f : 0.0f);
 }
 
 // Settings that have no knob always follow the files on disk (the folder's own settings.txt for the current bank).

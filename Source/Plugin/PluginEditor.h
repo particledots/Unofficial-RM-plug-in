@@ -1,4 +1,4 @@
-// Radio Music (unofficial) - user interface (milestone 2).
+// Radio Music (unofficial) - user interface (milestone 5).
 // An unofficial, clean-room plugin inspired by Music Thing Modular's Radio Music mk2,
 // designed by Tom Whitwell with Chris Johnson of Plus Minus Audio.
 #pragma once
@@ -103,7 +103,7 @@ private:
 } // namespace rmui
 
 //==============================================================================
-// The whole interface, laid out on a fixed 940 x 560 canvas. The editor below scales it to the window.
+// The whole interface, laid out on a fixed 940 x 684 canvas. The editor below scales it to the window.
 class RadioMusicPanel : public juce::Component,
                         private juce::Timer
 {
@@ -122,23 +122,27 @@ private:
     void addHint (juce::Component& c, const juce::String& text);
     void addHint (juce::Component& c, std::function<juce::String()> text);
     void applySpeedMode (int mode);
+    void applyTunerMode (int mode);
     void updateSnap();
 
     RadioMusicProcessor& processor;
 
     rmui::DialDisplay dial;
     rmui::BankStepper bankStepper;
-    rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob, speedKnob;
+    rmui::Knob startKnob, endKnob, crossfadeKnob, volumeKnob, speedKnob, noiseKnob, whistleKnob, strengthKnob;
     rmui::RmButton resetButton, pauseButton, hostSyncButton, radioStartButton, immediateButton, folderButton, rescanButton;
-    rmui::RmButton quantiseButton, gritButton;
-    rmui::Segmented loopSelector, speedModeSelector;
+    rmui::RmButton quantiseButton, gritButton, ssbButton;
+    rmui::Segmented loopSelector, speedModeSelector, tunerSelector, fadeSelector;
 
-    juce::AudioProcessorValueTreeState::SliderAttachment startAttach, endAttach, crossfadeAttach, volumeAttach;
+    juce::AudioProcessorValueTreeState::SliderAttachment startAttach, endAttach, crossfadeAttach, volumeAttach,
+                                                         noiseAttach, whistleAttach, strengthAttach;
     juce::AudioProcessorValueTreeState::ButtonAttachment pauseAttach, hostSyncAttach, radioStartAttach, immediateAttach,
-                                                         quantiseAttach, gritAttach;
+                                                         quantiseAttach, gritAttach, ssbAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;   // follows the speed mode
     juce::ParameterAttachment speedModeWatcher;
     int speedMode = 0;
+    juce::ParameterAttachment tunerWatcher;
+    int tunerMode = 0;
 
     std::unique_ptr<juce::FileChooser> chooser;
     std::map<juce::Component*, std::function<juce::String()>> hints;
@@ -153,7 +157,7 @@ private:
 class RadioMusicEditor : public juce::AudioProcessorEditor
 {
 public:
-    static constexpr int kBaseWidth = 940, kBaseHeight = 560;
+    static constexpr int kBaseWidth = 940, kBaseHeight = 684;
     static constexpr int kMinWidth = 705, kMaxWidth = 1880;
 
     explicit RadioMusicEditor (RadioMusicProcessor&);

@@ -155,11 +155,22 @@ int main (int argc, char** argv)
     pump (proc, 0.3);
     snap (proc, outDir.getChildFile ("4_90s.png"));
 
+    // 5. radio tuner mode (radio knobs active) and soft mode (crossfade knob dimmed)
+    setParam (proc, "speedMode", 0.0f);
+    setParam (proc, "tunerMode", 2.0f);
+    setParam (proc, "station", 0.30f);
+    pump (proc, 0.5);
+    snap (proc, outDir.getChildFile ("6_radio.png"));
+    setParam (proc, "tunerMode", 1.0f);
+    pump (proc, 0.3);
+    snap (proc, outDir.getChildFile ("7_soft.png"));
+    setParam (proc, "tunerMode", 0.0f);
+
     // scaled window (1.5x): panel must fill it
     {
         setParam (proc, "speedMode", 1.0f);
         std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
-        ed->setSize (1410, 840);
+        ed->setSize (1410, 1026);
         ed->setVisible (true);
         juce::Thread::sleep (50);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);

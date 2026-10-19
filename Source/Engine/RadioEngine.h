@@ -1,4 +1,4 @@
-// Radio Music (unofficial) - playback engine (milestone 3).
+// Radio Music (unofficial) - playback engine (milestone 5).
 // Clean-room implementation from the documented behaviour of Music Thing
 // Modular's Radio Music mk2 (Tom Whitwell with Chris Johnson).
 //
@@ -27,6 +27,12 @@ public:
     static constexpr int kNumVoices = 4;
 
     enum SpeedMode { SpeedTape = 0, SpeedNotes = 1, Speed90s = 2 };
+    enum TunerMode { TunerSharp = 0, TunerSoft = 1, TunerRadio = 2 };   // documented tunerMode 0, 1, 2
+    enum FadeMode  { FadeConstantPower = 0, FadeLinear = 1 };           // documented fadeMode 0, 1
+
+    // Radio mode: how strongly a station is transmitting, from its position in the bank. Random but fixed per station.
+    // minStrength is the documented minRadioStationStrength (0 to 256): 0 = anywhere from inaudible to full, 256 = all full.
+    static float stationStrength (int globalSlot, int minStrength) noexcept;
 
     RadioEngine();
     ~RadioEngine();
@@ -62,6 +68,15 @@ public:
         float speedNotes  = 0.0f;        // semitones, -48..+24
         bool  quantisePitch = true;      // notes mode: round to whole semitones
         bool  grit        = false;       // false: cubic interpolation. true: zero-order hold, 8-bit, ~20 kHz
+
+        // Tuner (milestone 5). Sharp: one station, crossfading between stations. Soft: neighbouring stations blend
+        // continuously as Station moves. Radio: stations emerge from noise.
+        int   tunerMode   = TunerSharp;
+        int   fadeMode    = FadeConstantPower;   // shape of crossfades and of the Soft blend
+        float noiseVol    = 50.0f;               // 0..100, radio mode hiss (documented noiseVol)
+        float whistleVol  = 50.0f;               // 0..100, radio mode whistle (documented whistleVol)
+        int   minStrength = 128;                 // 0..256, radio mode (documented minRadioStationStrength)
+        bool  ssb         = false;               // radio mode ring-modulation style shift (documented ssbEffect)
 
         // Radio clock source. Free-running by default; with hostSync the clock follows the DAW's sample position.
         bool    hostSync    = false;
@@ -106,6 +121,12 @@ private:
     static constexpr double kSpeedSmoothSeconds = 0.02; // speed changes glide over about this long
     static constexpr double kGritRate    = 20000.0;     // grit mode output rate
     static constexpr double kGritFilterHz = 8000.0;     // grit mode post-DAC filter
+    static constexpr double kPositionSmoothSeconds = 0.008;  // Soft and Radio: the Station position glides over about this long
+    static constexpr double kRadioReception   = 0.6;    // radio mode: a station is received within this fraction of its half-width
+    static constexpr double kNoiseLevel       = 0.30;   // radio mode: hiss peak level at noiseVol 100
+    static constexpr double kWhistleLevel     = 0.12;   // radio mode: whistle level at whistleVol 100
+    static constexpr double kWhistleMaxHz     = 2000.0; // radio mode: whistle pitch at the edge of reception
+    static constexpr double kSsbMaxHz         = 300.0;  // radio mode: ring-modulation frequency at the edge of reception
     static constexpr double kSettleSeconds    = 0.04;   // a moved End (or immediate Start) must hold still this long before it is used
 
     static constexpr int kMaxFiles = kMaxFilesTotal;
@@ -179,6 +200,7 @@ private:
         // ---- audio thread only ----
         enum class State { Idle, Loading, Playing };
         State    state   = State::Idle;
+        int      chan    = 0;          // which tuner channel the voice belongs to
         uint32_t gen     = 0;
         Sig      sig;
         PathCfg  cfg;
@@ -199,14 +221,17 @@ private:
     void invalidateAll() noexcept;
     void setIdle (Voice& v) noexcept;
     void requestVoice (Voice& v, const Sig& sig, const Table& t, int64_t clock, float fadeInc) noexcept;
+    bool isChannelVoice (int voiceIndex) const noexcept;
     int  allocVoice() noexcept;
-    void handleTargetChange (Sig desired, const Table& t, int64_t clock, float xfInc, float fastInc) noexcept;
+    void handleTargetChange (int c, Sig desired, const Table& t, int64_t clock, float xfInc, float fastInc) noexcept;
     void tryAlign (int voiceIndex, const Table& t, int64_t clock) noexcept;
     void renderVoice (Voice& v, float* out, int n, const Table& t, int64_t clock,
-                      const float* eff, double sumEff, const float* gain, bool cubic) noexcept;
+                      const float* eff, double sumEff, const float* gain, bool cubic,
+                      float chanGain0, float chanGain1, bool linearFade) noexcept;
+    void applyRadio (float* out, int n, double ampT, double noiseT, double whistleT, double whistleHzT, double ssbHzT) noexcept;
     bool popFrames (Voice& v, float* dst, int num) noexcept;
     double tauFor (int station, int64_t clock, double fileRate) const noexcept;
-    void publishStatus (const Table& t, int64_t clock, int desiredSlot, int desiredFile, int slotCount) noexcept;
+    void publishStatus (const Table& t, int64_t clock, int desiredSlot, int desiredFile, int slotCount, int domChan) noexcept;
     void reselect (int globalSlot, const Table& t) noexcept;
 
     // stream-thread helpers
@@ -234,9 +259,24 @@ private:
     // audio-thread state
     double   sessionRate = 44100.0;
     uint32_t knownTableId = 0;
-    int      current = -1, pending = -1;
-    Sig      committedSig, pendingSig;
-    int      lastDesiredSlot = -2;                 // global slot index (bank first slot + dial position)
+
+    // Two tuner channels. Sharp and Radio use channel 0 only. Soft uses both: neighbouring slots alternate between the
+    // channels (even slots on 0, odd on 1), so the two stations being blended are always on different channels.
+    struct Channel
+    {
+        int  current = -1, pending = -1;   // voice indices
+        Sig  committed, pendingSig;
+        int  lastSlot = -2;                // global slot index this channel was last tuned to
+        float gain = 1.0f;                 // channel gain at the end of the previous render chunk
+    };
+    std::array<Channel, 2> chans;
+    double xSm = 0.0;                      // smoothed Station position (Soft and Radio)
+    bool   xInit = false;
+
+    // Radio mode state
+    uint32_t noiseState = 0x1234567u;
+    double   rAmp = 0.0, rNoise = 0.0, rWhistle = 0.0, rWhistleHz = 0.0, rSsbHz = 0.0;
+    double   whistlePhase = 0.0, ssbPhase = 0.0;
     std::array<bool, kMaxFiles>     badStation {};   // per file
     std::array<double, kMaxFiles>   refClock {};     // per file: radio-clock sample at which its path began
     std::array<uint32_t, kMaxFiles> epochOf {};

@@ -57,6 +57,16 @@ RadioEngine::~RadioEngine()
     streamThread.reset();
 }
 
+// Radio mode station strength: a fixed pseudo-random value per station slot between minStrength/256 and 1.
+float RadioEngine::stationStrength (int globalSlot, int minStrength) noexcept
+{
+    uint32_t h = (uint32_t) globalSlot * 2654435761u + 0x9e3779b9u;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
+    const float u = (float) (h & 0xffffu) / 65535.0f;
+    const float m = juce::jlimit (0.0f, 1.0f, (float) minStrength / 256.0f);
+    return m + (1.0f - m) * u;
+}
+
 void RadioEngine::prepare (double sessionSampleRate)
 {
     sessionRate = sessionSampleRate > 0.0 ? sessionSampleRate : 44100.0;
@@ -70,6 +80,9 @@ void RadioEngine::prepare (double sessionSampleRate)
     curDir = 1;
     gritAcc = gritLP = 0.0;
     gritValue = 0.0f;
+    xInit = false;
+    rAmp = rNoise = rWhistle = rWhistleHz = rSsbHz = 0.0;
+    whistlePhase = ssbPhase = 0.0;
     resetFlag.store (false);
     invalidateAll();
 }
@@ -161,9 +174,8 @@ void RadioEngine::invalidateAll() noexcept
     for (auto& v : voices)
         setIdle (v);
 
-    current = pending = -1;
-    committedSig = pendingSig = Sig {};
-    lastDesiredSlot = -2;
+    for (auto& ch : chans)
+        ch = Channel {};
     badStation.fill (false);
     refClock.fill (0.0);
     epochOf.fill (0u);
@@ -221,10 +233,18 @@ void RadioEngine::requestVoice (Voice& v, const Sig& sig, const Table& t, int64_
     v.reqGen.store (v.gen, std::memory_order_release);
 }
 
+bool RadioEngine::isChannelVoice (int i) const noexcept
+{
+    for (const auto& ch : chans)
+        if (i == ch.current || i == ch.pending)
+            return true;
+    return false;
+}
+
 int RadioEngine::allocVoice() noexcept
 {
     for (int i = 0; i < kNumVoices; ++i)
-        if (voices[(size_t) i].state == Voice::State::Idle && i != current && i != pending)
+        if (voices[(size_t) i].state == Voice::State::Idle && ! isChannelVoice (i))
             return i;
 
     int best = -1;
@@ -232,7 +252,7 @@ int RadioEngine::allocVoice() noexcept
     for (int i = 0; i < kNumVoices; ++i)
     {
         auto& v = voices[(size_t) i];
-        if (i == current || i == pending)
+        if (isChannelVoice (i))
             continue;
         if (v.level < bestLevel)
         {
@@ -247,50 +267,52 @@ int RadioEngine::allocVoice() noexcept
     return best;
 }
 
-void RadioEngine::handleTargetChange (Sig desired, const Table& t, int64_t clock, float xfInc, float fastInc) noexcept
+void RadioEngine::handleTargetChange (int c, Sig desired, const Table& t, int64_t clock, float xfInc, float fastInc) noexcept
 {
-    if (desired.station >= 0 && badStation[(size_t) desired.station])
-        desired = committedSig;                          // never retry a file that failed to open
+    auto& ch = chans[(size_t) c];
 
-    if (desired == committedSig)
+    if (desired.station >= 0 && badStation[(size_t) desired.station])
+        desired = ch.committed;                          // never retry a file that failed to open
+
+    if (desired == ch.committed)
     {
-        if (pending >= 0)                                // tuned back to what is already playing
+        if (ch.pending >= 0)                             // tuned back to what is already playing
         {
-            setIdle (voices[(size_t) pending]);
-            pending = -1;
-            pendingSig = Sig {};
+            setIdle (voices[(size_t) ch.pending]);
+            ch.pending = -1;
+            ch.pendingSig = Sig {};
         }
         return;
     }
 
-    if (desired.station >= 0 && desired == pendingSig)
+    if (desired.station >= 0 && desired == ch.pendingSig)
         return;
 
-    if (desired.station < 0)                             // folder is empty: fade out whatever is playing
+    if (desired.station < 0)                             // nothing wanted on this channel: fade out whatever is playing
     {
-        if (pending >= 0)
+        if (ch.pending >= 0)
         {
-            setIdle (voices[(size_t) pending]);
-            pending = -1;
-            pendingSig = Sig {};
+            setIdle (voices[(size_t) ch.pending]);
+            ch.pending = -1;
+            ch.pendingSig = Sig {};
         }
-        if (current >= 0)
+        if (ch.current >= 0)
         {
-            voices[(size_t) current].levelTarget = 0.0f;
-            voices[(size_t) current].levelInc    = xfInc;
+            voices[(size_t) ch.current].levelTarget = 0.0f;
+            voices[(size_t) ch.current].levelInc    = xfInc;
         }
-        current = -1;
-        committedSig = Sig {};
+        ch.current = -1;
+        ch.committed = Sig {};
         return;
     }
 
     // A new station uses the crossfade time; Reset, loop and window changes on the same station use a short fade.
-    const float fade = (desired.station != committedSig.station) ? xfInc : std::max (xfInc, fastInc);
+    const float fade = (desired.station != ch.committed.station) ? xfInc : std::max (xfInc, fastInc);
 
-    if (pending >= 0)                                    // retarget the voice that is still loading
+    if (ch.pending >= 0)                                 // retarget the voice that is still loading
     {
-        requestVoice (voices[(size_t) pending], desired, t, clock, fade);
-        pendingSig = desired;
+        requestVoice (voices[(size_t) ch.pending], desired, t, clock, fade);
+        ch.pendingSig = desired;
         return;
     }
 
@@ -299,11 +321,12 @@ void RadioEngine::handleTargetChange (Sig desired, const Table& t, int64_t clock
         return;
 
     auto& v = voices[(size_t) vi];
+    v.chan = c;
     v.level = 0.0f;
     v.levelTarget = 1.0f;
     requestVoice (v, desired, t, clock, fade);
-    pending = vi;
-    pendingSig = desired;
+    ch.pending = vi;
+    ch.pendingSig = desired;
 }
 
 bool RadioEngine::popFrames (Voice& v, float* dst, int num) noexcept
@@ -330,21 +353,22 @@ bool RadioEngine::popFrames (Voice& v, float* dst, int num) noexcept
 void RadioEngine::tryAlign (int voiceIndex, const Table& t, int64_t clock) noexcept
 {
     auto& v = voices[(size_t) voiceIndex];
+    auto& ch = chans[(size_t) v.chan];
 
     if (v.failedGen.load (std::memory_order_acquire) == v.gen)
     {
         if (v.sig.station >= 0 && v.sig.station < kMaxFiles)
             badStation[(size_t) v.sig.station] = true;
 
-        if (voiceIndex == pending)
+        if (voiceIndex == ch.pending)
         {
-            pending = -1;
-            pendingSig = Sig {};
+            ch.pending = -1;
+            ch.pendingSig = Sig {};
         }
-        if (voiceIndex == current)
+        if (voiceIndex == ch.current)
         {
-            current = -1;
-            committedSig = Sig {};
+            ch.current = -1;
+            ch.committed = Sig {};
         }
         setIdle (v);
         return;
@@ -380,30 +404,31 @@ void RadioEngine::tryAlign (int voiceIndex, const Table& t, int64_t clock) noexc
     v.consumed = skip;
     v.state = Voice::State::Playing;
 
-    if (voiceIndex == pending)
+    if (voiceIndex == ch.pending)
     {
         v.level = 0.0f;
         v.levelTarget = 1.0f;
         v.levelInc = v.fadeInc;
 
-        if (current >= 0)
+        if (ch.current >= 0)
         {
-            auto& old = voices[(size_t) current];
+            auto& old = voices[(size_t) ch.current];
             old.levelTarget = 0.0f;
             old.levelInc = v.fadeInc;
             if (old.state == Voice::State::Loading)
                 setIdle (old);
         }
 
-        current = pending;
-        committedSig = pendingSig;
-        pending = -1;
-        pendingSig = Sig {};
+        ch.current = ch.pending;
+        ch.committed = ch.pendingSig;
+        ch.pending = -1;
+        ch.pendingSig = Sig {};
     }
 }
 
 void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int64_t clock,
-                               const float* eff, double sumEff, const float* gain, bool cubic) noexcept
+                               const float* eff, double sumEff, const float* gain, bool cubic,
+                               float chanGain0, float chanGain1, bool linearFade) noexcept
 {
     const double adv = v.phase + v.step * sumEff;
     const int k = (int) adv;
@@ -435,6 +460,8 @@ void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int6
     const float target = v.levelTarget;
     const float inc = v.levelInc;
     const float dir = target > level ? 1.0f : -1.0f;
+    const float chanStep = (chanGain1 - chanGain0) / (float) n;
+    float chanGain = chanGain0;
 
     double p = v.phase;
     for (int i = 0; i < n; ++i)
@@ -464,14 +491,15 @@ void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int6
             level += dir * inc;
             if ((dir > 0.0f && level >= target) || (dir < 0.0f && level <= target))
                 level = target;
-            g = std::sin (level * juce::MathConstants<float>::halfPi);   // constant power
+            g = linearFade ? level : std::sin (level * juce::MathConstants<float>::halfPi);   // linear or constant power
         }
         else
         {
             g = (level >= 1.0f) ? 1.0f : 0.0f;
         }
 
-        out[i] += sample * g * gain[i];
+        chanGain += chanStep;
+        out[i] += sample * g * gain[i] * chanGain;
     }
 
     v.level = level;
@@ -486,7 +514,7 @@ void RadioEngine::renderVoice (Voice& v, float* out, int n, const Table& t, int6
         setIdle (v);
 }
 
-void RadioEngine::publishStatus (const Table&, int64_t clock, int desiredSlot, int desiredFile, int slotCount) noexcept
+void RadioEngine::publishStatus (const Table&, int64_t clock, int desiredSlot, int desiredFile, int slotCount, int domChan) noexcept
 {
     uiClockSeconds.store ((double) clock / sessionRate, std::memory_order_relaxed);
     uiStation.store (desiredSlot);
@@ -501,9 +529,9 @@ void RadioEngine::publishStatus (const Table&, int64_t clock, int desiredSlot, i
     uiWinRev.store (w.rev);
 
     double frac = -1.0;
-    if (current >= 0)
+    if (chans[(size_t) domChan].current >= 0)
     {
-        const auto& v = voices[(size_t) current];
+        const auto& v = voices[(size_t) chans[(size_t) domChan].current];
         if (v.state == Voice::State::Playing && v.numFrames > 0)
         {
             const int64_t tau = (int64_t) std::floor (tauFor (v.sig.station, clock, v.fileRate));
@@ -511,6 +539,43 @@ void RadioEngine::publishStatus (const Table&, int64_t clock, int desiredSlot, i
         }
     }
     uiPlayFrac.store (frac, std::memory_order_relaxed);
+}
+
+// Radio mode: the station is scaled by how well it is received, then hiss and a whistle are added. Smoothed per sample.
+void RadioEngine::applyRadio (float* out, int n, double ampT, double noiseT, double whistleT, double whistleHzT, double ssbHzT) noexcept
+{
+    const double sr = sessionRate;
+    const double a = 1.0 - std::exp (-1.0 / (0.005 * sr));
+    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+
+    for (int i = 0; i < n; ++i)
+    {
+        rAmp       += (ampT - rAmp) * a;
+        rNoise     += (noiseT - rNoise) * a;
+        rWhistle   += (whistleT - rWhistle) * a;
+        rWhistleHz += (whistleHzT - rWhistleHz) * a;
+        rSsbHz     += (ssbHzT - rSsbHz) * a;
+
+        float x = out[i];
+
+        if (rSsbHz > 0.001)                              // ring modulation that fades out as the station is tuned exactly
+        {
+            const double depth = std::min (1.0, rSsbHz / 20.0);
+            ssbPhase += twoPi * rSsbHz / sr;
+            if (ssbPhase > twoPi) ssbPhase -= twoPi;
+            x *= (float) ((1.0 - depth) + depth * std::cos (ssbPhase));
+        }
+
+        noiseState ^= noiseState << 13;
+        noiseState ^= noiseState >> 17;
+        noiseState ^= noiseState << 5;
+        const float noise = (float) (int32_t) noiseState / 2147483648.0f;
+
+        whistlePhase += twoPi * rWhistleHz / sr;
+        if (whistlePhase > twoPi) whistlePhase -= twoPi;
+
+        out[i] = (float) ((double) x * rAmp + (double) noise * rNoise + std::sin (whistlePhase) * rWhistle);
+    }
 }
 
 void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
@@ -545,13 +610,16 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     const int firstSlot  = t.bankFirst[(size_t) bank];
     const int divider    = juce::jlimit (1, kStartSteps, p.startDivider);
 
-    int desiredSlot = -1;                  // position on the dial, 0 .. count - 1
-    if (count > 0)
-        desiredSlot = juce::jlimit (0, count - 1, (int) std::floor (juce::jlimit (0.0f, 1.0f, p.station) * (float) count));
+    const bool soft      = p.tunerMode == TunerSoft;
+    const bool radio     = p.tunerMode == TunerRadio;
+    const bool smoothX   = soft || radio;
+    const bool linearFade = p.fadeMode == FadeLinear;
 
-    const int globalSlot = desiredSlot >= 0 ? firstSlot + desiredSlot : -1;
+    auto slotAt = [count] (double x)      // dial position (0 .. count - 1) of the station whose segment contains x, -1 if none
+    {
+        return count > 0 ? juce::jlimit (0, count - 1, (int) std::floor (juce::jlimit (0.0, 1.0, x) * (double) count)) : -1;
+    };
     auto fileOfSlot = [&] (int g) { return g >= 0 ? t.slots[(size_t) g].firstFile + slotCur[(size_t) g] : -1; };
-    int desiredStation = fileOfSlot (globalSlot);   // index of the file that plays (all per-file arrays use this)
 
     int64_t clock = clockSamples.load (std::memory_order_relaxed);
 
@@ -560,7 +628,8 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     {
         if (! p.hostPlaying || p.hostSamples < 0)
         {
-            publishStatus (t, clock, desiredSlot, desiredStation, count);
+            const int ds = slotAt (p.station);
+            publishStatus (t, clock, ds, fileOfSlot (ds >= 0 ? firstSlot + ds : -1), count, soft && ds >= 0 ? (ds & 1) : 0);
             readingTable.store (-1);
             return;
         }
@@ -570,8 +639,11 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
             clock = p.hostSamples;
             for (auto& v : voices)
                 setIdle (v);
-            current = pending = -1;
-            committedSig = pendingSig = Sig {};
+            for (auto& ch : chans)
+            {
+                ch.current = ch.pending = -1;
+                ch.committed = ch.pendingSig = Sig {};
+            }
         }
     }
 
@@ -620,6 +692,7 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     gritHold = sr / kGritRate;
     const double gritCoef = 1.0 - std::exp (-2.0 * juce::MathConstants<double>::pi * kGritFilterHz / sr);
 
+    int domSlot = -1, domFile = -1, domChan = 0;
     int done = 0;
 
     while (done < numSamples)
@@ -637,77 +710,143 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
         if (p.startImmediate && startStable >= settle)
             latchedStart = seenStart;
 
-        // Reset: restart the tuned station from START. START is read at this moment.
-        // A file named "...skipN" makes the next N resets be ignored while it plays; a subfolder moves on to its next file.
-        if (resetFlag.exchange (false))
+        // Station position. Sharp follows the knob directly; Soft and Radio glide to it so the blend has no steps.
+        if (! smoothX || ! xInit)
         {
-            if (globalSlot < 0)
+            xSm = (double) p.station;
+            xInit = true;
+        }
+        else
+        {
+            xSm += ((double) p.station - xSm) * (1.0 - std::exp (-(double) n / (kPositionSmoothSeconds * sr)));
+        }
+        const double x = juce::jlimit (0.0, 1.0, xSm);
+
+        // Which stations are wanted, on which channel, and how loud. Sharp and Radio: the station whose segment holds the
+        // knob, on channel 0. Soft: the two stations either side of the knob, blended (stations sit in the middle of their
+        // segment; beyond the first and last station only that station plays).
+        struct Want { int slot = -1; int g = -1; float gain = 0.0f; };
+        Want want[2];
+        domSlot = slotAt (x);
+
+        if (count > 0)
+        {
+            if (soft)
             {
-                latchedStart = startNow;
-            }
-            else if (skipLeft[(size_t) globalSlot] > 0)
-            {
-                skipLeft[(size_t) globalSlot] -= 1;           // ignored
-                diagIgnored.fetch_add (1, std::memory_order_relaxed);
+                const double pos = juce::jlimit (0.0, (double) (count - 1), x * (double) count - 0.5);
+                int lo = juce::jlimit (0, count - 1, (int) std::floor (pos));
+                double f = pos - (double) lo;
+                if (lo >= count - 1) { lo = count - 1; f = 0.0; }
+
+                const float fl = (float) f;
+                const float gLo = linearFade ? 1.0f - fl : std::cos (fl * juce::MathConstants<float>::halfPi);
+                const float gHi = linearFade ? fl        : std::sin (fl * juce::MathConstants<float>::halfPi);
+
+                want[lo & 1] = { lo, firstSlot + lo, gLo };
+                if (lo + 1 < count)
+                    want[(lo + 1) & 1] = { lo + 1, firstSlot + lo + 1, gHi };
             }
             else
             {
-                latchedStart = startNow;
-                const int before = desiredStation;
-                reselect (globalSlot, t);
-                desiredStation = fileOfSlot (globalSlot);
-                diagApplied.fetch_add (1, std::memory_order_relaxed);
-                if (desiredStation != before)
-                    diagFileChanges.fetch_add (1, std::memory_order_relaxed);
-                refClock[(size_t) desiredStation] = (double) clock;
-                epochOf[(size_t) desiredStation] += 1;
-                skipLeft[(size_t) globalSlot] = (int) t.skip[(size_t) desiredStation];
+                want[0] = { domSlot, firstSlot + domSlot, 1.0f };
             }
+        }
+
+        domChan = soft && domSlot >= 0 ? (domSlot & 1) : 0;
+
+        // Reset: restart the tuned station(s) from START. START is read at this moment. In Soft mode every station that is
+        // audible restarts. A file named "...skipN" makes the next N resets be ignored while it plays; a subfolder moves
+        // on to its next file.
+        if (resetFlag.exchange (false))
+        {
+            bool any = false;
+            for (const auto& w : want)
+            {
+                if (w.g < 0 || ! (w.gain > 0.0f))
+                    continue;
+
+                any = true;
+                if (skipLeft[(size_t) w.g] > 0)
+                {
+                    skipLeft[(size_t) w.g] -= 1;              // ignored
+                    diagIgnored.fetch_add (1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    latchedStart = startNow;
+                    const int before = fileOfSlot (w.g);
+                    reselect (w.g, t);
+                    const int after = fileOfSlot (w.g);
+                    diagApplied.fetch_add (1, std::memory_order_relaxed);
+                    if (after != before)
+                        diagFileChanges.fetch_add (1, std::memory_order_relaxed);
+                    refClock[(size_t) after] = (double) clock;
+                    epochOf[(size_t) after] += 1;
+                    skipLeft[(size_t) w.g] = (int) t.skip[(size_t) after];
+                }
+            }
+
+            if (! any)
+                latchedStart = startNow;
         }
 
         // Tuning to a station: a subfolder may pick a new file (if enabled), skipN counts start, and with radio start off
         // the station restarts from START.
-        if (globalSlot != lastDesiredSlot)
+        int file[2] = { -1, -1 };
+        for (int c = 0; c < 2; ++c)
         {
-            if (globalSlot >= 0)
+            auto& ch = chans[(size_t) c];
+            const int g = want[c].g;
+
+            if (g != ch.lastSlot)
             {
-                bool restart = ! p.radioStart;
-
-                if (p.reselectOnTune && t.slots[(size_t) globalSlot].numFiles > 1)
+                if (g >= 0)
                 {
-                    reselect (globalSlot, t);
-                    desiredStation = fileOfSlot (globalSlot);
-                    restart = true;
-                }
+                    bool restart = ! p.radioStart;
 
-                if (restart)
-                {
-                    latchedStart = startNow;
-                    refClock[(size_t) desiredStation] = (double) clock;
-                    epochOf[(size_t) desiredStation] += 1;
-                }
+                    if (p.reselectOnTune && t.slots[(size_t) g].numFiles > 1)
+                    {
+                        reselect (g, t);
+                        restart = true;
+                    }
 
-                skipLeft[(size_t) globalSlot] = (int) t.skip[(size_t) desiredStation];
+                    if (restart)
+                    {
+                        const int f = fileOfSlot (g);
+                        latchedStart = startNow;
+                        refClock[(size_t) f] = (double) clock;
+                        epochOf[(size_t) f] += 1;
+                    }
+
+                    skipLeft[(size_t) g] = (int) t.skip[(size_t) fileOfSlot (g)];
+                }
+                ch.lastSlot = g;
             }
-            lastDesiredSlot = globalSlot;
+
+            file[c] = fileOfSlot (g);
         }
+
+        domFile = file[domChan];
 
         // Playing backwards needs a voice that reads the path backwards: switch once the speed has crossed zero.
         if (curDir > 0 && speedSm < -0.002)       curDir = -1;
         else if (curDir < 0 && speedSm > 0.002)   curDir = 1;
 
-        Sig desired;
-        if (desiredStation >= 0)
+        for (int c = 0; c < 2; ++c)
         {
-            desired.station   = desiredStation;
-            desired.startStep = latchedStart;
-            desired.endStep   = appliedEnd;
-            desired.loopMode  = juce::jlimit (0, 2, p.loopMode);
-            desired.epoch     = epochOf[(size_t) desiredStation];
-            desired.dir       = curDir;
-        }
+            Sig desired;
+            if (file[c] >= 0)
+            {
+                desired.station   = file[c];
+                desired.startStep = latchedStart;
+                desired.endStep   = appliedEnd;
+                desired.loopMode  = juce::jlimit (0, 2, p.loopMode);
+                desired.epoch     = epochOf[(size_t) file[c]];
+                desired.dir       = curDir;
+            }
 
-        handleTargetChange (desired, t, clock, xfInc, fastInc);
+            handleTargetChange (c, desired, t, clock, soft ? fastInc : xfInc, fastInc);   // Soft mode does not use the crossfade time
+        }
 
         for (int i = 0; i < kNumVoices; ++i)
             if (voices[(size_t) i].state == Voice::State::Loading)
@@ -733,24 +872,62 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
             sumAll += e;
         }
 
+        // Channel gains. Soft: each channel carries its blend gain, but only once the channel really holds the wanted file
+        // (so a neighbour that is still loading is silent instead of playing the wrong file). Other modes: full.
+        float chanTarget[2] = { 1.0f, 1.0f };
+        if (soft)
+            for (int c = 0; c < 2; ++c)
+                chanTarget[c] = (file[c] >= 0 && chans[(size_t) c].committed.station == file[c]) ? want[c].gain : 0.0f;
+
         for (int i = 0; i < kNumVoices; ++i)
         {
             auto& v = voices[(size_t) i];
             if (v.state == Voice::State::Playing)
             {
+                const float g0 = chans[(size_t) v.chan].gain, g1 = chanTarget[v.chan];
+
                 if (v.step * kMaxSpeed > kMaxStep * kMaxSpeed || v.step <= 0.0)
                     setIdle (v);
                 else if (v.sig.dir > 0)
-                    renderVoice (v, out + done, n, t, clock, effPos.data(), sumPos, gainPos.data(), cubic);
+                    renderVoice (v, out + done, n, t, clock, effPos.data(), sumPos, gainPos.data(), cubic, g0, g1, linearFade);
                 else
-                    renderVoice (v, out + done, n, t, clock, effNeg.data(), sumNeg, gainNeg.data(), cubic);
+                    renderVoice (v, out + done, n, t, clock, effNeg.data(), sumNeg, gainNeg.data(), cubic, g0, g1, linearFade);
             }
         }
 
+        for (int c = 0; c < 2; ++c)
+            chans[(size_t) c].gain = chanTarget[c];
+
         // The tuned station moves by (speed x time); the difference to real time is what it has fallen behind the radio clock
-        // (negative if it has moved ahead). Other stations are not affected.
-        if (committedSig.station >= 0)
-            refClock[(size_t) committedSig.station] += (double) n - sumAll;
+        // (negative if it has moved ahead). Other stations are not affected. In Soft mode both blended stations are tuned.
+        for (int c = 0; c < 2; ++c)
+        {
+            const auto& ch = chans[(size_t) c];
+            if (ch.committed.station >= 0 && chanTarget[c] > 0.0f)
+                refClock[(size_t) ch.committed.station] += (double) n - sumAll;
+        }
+
+        // Radio mode: reception strength, hiss and whistle depend on how far the knob is from the middle of the station.
+        if (radio)
+        {
+            double ampT = 0.0, noiseT = 0.0, whistleT = 0.0, whistleHzT = 0.0, ssbHzT = 0.0;
+
+            if (want[0].g >= 0)
+            {
+                const double pos = x * (double) count;
+                const double rn = std::min (1.0, 2.0 * std::fabs (pos - ((double) want[0].slot + 0.5)));   // 0 = exactly tuned, 1 = halfway to the next station
+                const double s = juce::jlimit (0.0, 1.0, 1.0 - rn / kRadioReception);                       // 1 at the station, 0 outside reception
+                const double shape = s * s * (3.0 - 2.0 * s);
+
+                ampT = (double) stationStrength (want[0].g, p.minStrength) * shape;
+                noiseT = (double) juce::jlimit (0.0f, 100.0f, p.noiseVol) / 100.0 * kNoiseLevel * (1.0 - ampT);
+                whistleHzT = kWhistleMaxHz * std::min (1.0, rn / kRadioReception);
+                whistleT = (double) juce::jlimit (0.0f, 100.0f, p.whistleVol) / 100.0 * kWhistleLevel * s * std::min (1.0, whistleHzT / 80.0);
+                ssbHzT = p.ssb ? rn * kSsbMaxHz : 0.0;
+            }
+
+            applyRadio (out + done, n, ampT, noiseT, whistleT, whistleHzT, ssbHzT);
+        }
 
         clock += n;
         done += n;
@@ -773,7 +950,7 @@ void RadioEngine::process (float* out, int numSamples, const Params& p) noexcept
     }
 
     clockSamples.store (clock, std::memory_order_relaxed);
-    publishStatus (t, clock, desiredSlot, desiredStation, count);
+    publishStatus (t, clock, domSlot, domFile, count, domChan);
     readingTable.store (-1);
 }
 

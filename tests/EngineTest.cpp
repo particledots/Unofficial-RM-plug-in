@@ -1146,6 +1146,230 @@ static void testNextFolderRealistic (const juce::File& root)
     }
 }
 
+
+//==============================================================================
+// Milestone 5: Soft and Radio tuner modes, fade modes
+
+struct Stat { double mean = 0.0, lo = 1e9, hi = -1e9, rms = 0.0, maxStep = 0.0; };
+
+static Stat measure (Runner& r, RadioEngine::Params& p, double settle, double seconds)
+{
+    r.run (settle, p);
+    Stat st;
+    std::vector<float> all;
+    r.run (seconds, p, [&] (int64_t, const float* o, int n) { all.insert (all.end(), o, o + n); });
+    double sum = 0.0;
+    for (size_t i = 0; i < all.size(); ++i)
+    {
+        sum += all[i];
+        st.lo = std::min (st.lo, (double) all[i]);
+        st.hi = std::max (st.hi, (double) all[i]);
+        if (i > 0) st.maxStep = std::max (st.maxStep, (double) std::fabs (all[i] - all[i - 1]));
+    }
+    st.mean = sum / (double) all.size();
+    double sq = 0.0;
+    for (auto v : all) sq += (v - st.mean) * (v - st.mean);
+    st.rms = std::sqrt (sq / (double) all.size());
+    return st;
+}
+
+static void testSoft (const juce::File& dc, const juce::File& dc3)
+{
+    std::cout << "\n=== M5 Soft tuner mode ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dc);                          // station 0 = DC 0.5, station 1 = DC 0.25
+    RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+    Runner r { engine, sr };
+    RadioEngine::Params p;
+    p.tunerMode = RadioEngine::TunerSoft;
+    p.crossfadeMs = 5000.0f;                             // Soft must not use the crossfade time
+
+    struct Case { float x; double expect; const char* name; };
+    const double cp = 0.5 * std::sqrt (0.5) + 0.25 * std::sqrt (0.5);
+    const Case cases[] = { { 0.0f, 0.5, "far left: first station alone" }, { 0.25f, 0.5, "middle of station 1: it plays alone" },
+                           { 0.5f, cp, "halfway between: constant-power blend" }, { 0.75f, 0.25, "middle of station 2: it plays alone" },
+                           { 1.0f, 0.25, "far right: last station alone (no wrap)" } };
+    for (const auto& c : cases)
+    {
+        p.station = c.x;
+        const auto st = measure (r, p, 0.5, 0.1);
+        std::cout << "    x=" << c.x << " level " << st.mean << " (expected " << c.expect << ")\n";
+        CHECK (std::fabs (st.mean - c.expect) < 0.01, c.name);
+    }
+
+    p.fadeMode = RadioEngine::FadeLinear;
+    p.station = 0.5f;
+    {
+        const auto st = measure (r, p, 0.3, 0.1);
+        CHECK (std::fabs (st.mean - 0.375) < 0.01, "linear fade mode: halfway between = plain average (0.375)");
+    }
+    p.fadeMode = RadioEngine::FadeConstantPower;
+
+    // A slow sweep across three stations (so the two channels swap roles twice) must have no dropouts or clicks.
+    auto lib3 = scanFolder (dc3);                        // 0.6, 0.3, 0.15
+    CHECK (lib3->stations.size() == 3, "three DC stations found");
+    RadioEngine e3; e3.prepare (sr); e3.setLibrary (lib3);
+    Runner r3 { e3, sr, 128 };
+    RadioEngine::Params q;
+    q.tunerMode = RadioEngine::TunerSoft;
+    q.station = 0.0f;
+    r3.run (0.5, q);
+
+    const double sweepSeconds = 3.0;
+    double lo = 10.0, hi = -10.0, maxStep = 0.0, prev = -100.0;
+    double xs = 0.0;
+    r3.run (sweepSeconds, q, [&] (int64_t, const float* o, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            lo = std::min (lo, (double) o[i]); hi = std::max (hi, (double) o[i]);
+            if (prev > -50.0) maxStep = std::max (maxStep, std::fabs ((double) o[i] - prev));
+            prev = o[i];
+        }
+        xs += (double) n / (sr * sweepSeconds);
+        q.station = (float) std::min (1.0, xs);
+    });
+    std::cout << "    sweep: min " << lo << " max " << hi << " largest step " << maxStep << "\n";
+    CHECK (maxStep < 0.003, "slow sweep across 3 stations: no clicks or dropouts");
+    CHECK (lo > 0.14 && hi < 0.7, "sweep stays between the station levels (never silent, never above the loudest blend)");
+
+    // The Reset button restarts both audible stations.
+    q.station = 1.0f / 3.0f;                             // halfway between station 1 and station 2 on the Soft scale
+    const auto before = measure (r3, q, 0.4, 0.05);
+    e3.requestReset();
+    const auto after = measure (r3, q, 0.1, 0.1);
+    std::cout << "    blend before reset " << before.mean << " after " << after.mean << "\n";
+    CHECK (std::fabs (before.mean - after.mean) < 0.01, "Reset keeps the blend steady (DC files)");
+    CHECK (e3.getResetsApplied() == 2, "Reset in the middle of a blend is applied to both stations");
+}
+
+static void testRadio (const juce::File& dc)
+{
+    std::cout << "\n=== M5 Radio tuner mode ===\n";
+    const double sr = 48000.0;
+    auto lib = scanFolder (dc);                          // station 0 = DC 0.5, station 1 = DC 0.25
+    RadioEngine engine; engine.prepare (sr); engine.setLibrary (lib);
+    Runner r { engine, sr };
+    RadioEngine::Params p;
+    p.tunerMode = RadioEngine::TunerRadio;
+    p.minStrength = 256;                                 // every station at full strength
+    p.noiseVol = 100.0f; p.whistleVol = 0.0f;
+
+    // reception shape: rn = distance from the station centre as a fraction of half a segment; reception ends at rn = 0.6
+    auto amp = [] (double rn) { const double s = std::max (0.0, 1.0 - rn / 0.6); return s * s * (3.0 - 2.0 * s); };
+
+    p.station = 0.25f;                                   // exactly on station 1
+    {
+        const auto st = measure (r, p, 0.5, 0.2);
+        std::cout << "    on station: mean " << st.mean << " rms " << st.rms << "\n";
+        CHECK (std::fabs (st.mean - 0.5) < 0.01 && st.rms < 0.01, "exactly tuned at full strength: clean station, no hiss");
+    }
+
+    p.station = 0.5f;                                    // halfway between the two stations
+    {
+        const auto st = measure (r, p, 0.3, 0.3);
+        std::cout << "    between stations: mean " << st.mean << " rms " << st.rms << "\n";
+        CHECK (st.rms > 0.14 && st.rms < 0.21, "between stations: hiss only (uniform noise, peak 0.3 at noise 100)");
+        CHECK (std::fabs (st.mean) < 0.02, "between stations: no station leaks through");
+    }
+
+    p.noiseVol = 50.0f;
+    {
+        const auto st = measure (r, p, 0.3, 0.3);
+        CHECK (st.rms > 0.07 && st.rms < 0.105, "noise 50 is half as loud as noise 100");
+    }
+
+    p.noiseVol = 0.0f;
+    {
+        const auto st = measure (r, p, 0.3, 0.2);
+        CHECK (std::max (std::fabs (st.lo), std::fabs (st.hi)) < 1.0e-3, "noise 0 and whistle 0: silence between stations");
+    }
+
+    p.noiseVol = 100.0f;
+    p.station = 0.3f;                                    // a little off station 1 (rn = 0.2)
+    {
+        const double a = amp (0.2);
+        const auto st = measure (r, p, 0.5, 0.3);
+        std::cout << "    slightly off: mean " << st.mean << " (expected " << 0.5 * a << "), rms " << st.rms << "\n";
+        CHECK (std::fabs (st.mean - 0.5 * a) < 0.012, "slightly off station: the station is quieter by the reception curve");
+        CHECK (st.rms > 0.02, "slightly off station: hiss is mixed in");
+    }
+
+    // Whistle: a sine, silent when exactly tuned, louder off to the side.
+    p.noiseVol = 0.0f; p.whistleVol = 100.0f;
+    p.station = 0.25f;
+    {
+        const auto st = measure (r, p, 0.5, 0.3);
+        CHECK ((st.hi - st.lo) < 0.01, "whistle fades away at exact tune (no beat, no DC jump)");
+    }
+    p.station = 0.3f;
+    {
+        const auto st = measure (r, p, 0.5, 0.3);
+        std::cout << "    whistle swing " << (st.hi - st.lo) * 0.5 << "\n";
+        CHECK ((st.hi - st.lo) * 0.5 > 0.05 && (st.hi - st.lo) * 0.5 < 0.11, "whistle audible beside the station (about 0.08)");
+    }
+
+    // SSB effect (ring-modulation style): untouched at exact tune, strongly modulated off tune.
+    p.whistleVol = 0.0f; p.ssb = true;
+    p.station = 0.25f;
+    {
+        const auto st = measure (r, p, 0.5, 0.2);
+        CHECK (std::fabs (st.mean - 0.5) < 0.01 && (st.hi - st.lo) < 0.01, "SSB on, exactly tuned: station unchanged");
+    }
+    p.station = 0.3f;
+    {
+        const auto st = measure (r, p, 0.5, 0.4);
+        std::cout << "    SSB off-tune swing " << st.hi - st.lo << "\n";
+        CHECK ((st.hi - st.lo) > 0.2, "SSB on, off tune: the station is ring-modulated");
+    }
+    p.ssb = false;
+
+    // Station strengths.
+    {
+        float lo = 2.0f, hi = -1.0f; double sum = 0.0;
+        for (int g = 0; g < 400; ++g) { const float s = RadioEngine::stationStrength (g, 0); lo = std::min (lo, s); hi = std::max (hi, s); sum += s; }
+        std::cout << "    strength at min 0: " << lo << " .. " << hi << " mean " << sum / 400.0 << "\n";
+        CHECK (lo >= 0.0f && hi <= 1.0f && lo < 0.1f && hi > 0.9f && std::fabs (sum / 400.0 - 0.5) < 0.1, "minRadioStationStrength 0: strengths spread from inaudible to full");
+        float lo2 = 2.0f, hi2 = -1.0f, lo3 = 2.0f;
+        for (int g = 0; g < 400; ++g)
+        {
+            const float s = RadioEngine::stationStrength (g, 128); lo2 = std::min (lo2, s); hi2 = std::max (hi2, s);
+            lo3 = std::min (lo3, RadioEngine::stationStrength (g, 256));
+        }
+        CHECK (lo2 >= 0.5f && hi2 <= 1.0f, "minRadioStationStrength 128: nothing weaker than half");
+        CHECK (lo3 > 0.999f, "minRadioStationStrength 256: all stations at full strength");
+    }
+
+    p.noiseVol = 0.0f; p.minStrength = 0;
+    for (int slot = 0; slot < 2; ++slot)
+    {
+        p.station = (float) (slot * 0.5 + 0.25);
+        const double S = RadioEngine::stationStrength (slot, 0);
+        const double value = slot == 0 ? 0.5 : 0.25;
+        const auto st = measure (r, p, 0.5, 0.2);
+        std::cout << "    station " << slot << " strength " << S << " level " << st.mean << " (expected " << S * value << ")\n";
+        CHECK (std::fabs (st.mean - S * value) < 0.01, "a weak station is quieter by its strength");
+    }
+
+    // Walking across the boundary between two stations: no clicks.
+    p.minStrength = 256; p.noiseVol = 0.0f; p.whistleVol = 0.0f;
+    p.station = 0.25f;
+    r.run (0.5, p);
+    double maxStep = 0.0, prev = -100.0, xs = 0.25;
+    r.run (2.0, p, [&] (int64_t, const float* o, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if (prev > -50.0) maxStep = std::max (maxStep, std::fabs ((double) o[i] - prev));
+            prev = o[i];
+        }
+        xs = std::min (0.75, xs + 0.5 * (double) n / (sr * 2.0));
+        p.station = (float) xs;
+    });
+    std::cout << "    walk across: largest step " << maxStep << "\n";
+    CHECK (maxStep < 0.003, "walking from one station to the next: no clicks");
+}
+
 int main (int argc, char** argv)
 {
     auto root = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rm_engine_test");
@@ -1171,6 +1395,11 @@ int main (int argc, char** argv)
     auto win = root.getChildFile ("win"); win.createDirectory();
     writeRamp (win.getChildFile ("win.wav"), 48000.0, 10.0, 24, 1);
 
+    auto dc3 = root.getChildFile ("dc3"); dc3.createDirectory();
+    writeDC (dc3.getChildFile ("a.wav"), 48000.0, 3.0, 0.6f);
+    writeDC (dc3.getChildFile ("b.wav"), 48000.0, 3.0, 0.3f);
+    writeDC (dc3.getChildFile ("c.wav"), 48000.0, 3.0, 0.15f);
+
     auto two = root.getChildFile ("two"); two.createDirectory();
     writeRamp (two.getChildFile ("a.wav"), 48000.0, 10.0, 24, 1);
     writeRamp (two.getChildFile ("b.wav"), 48000.0, 10.0, 24, 1);
@@ -1180,6 +1409,15 @@ int main (int argc, char** argv)
 
     auto sine = root.getChildFile ("sine"); sine.createDirectory();
     writeSine (sine.getChildFile ("sine.wav"), 44100.0, 10.0, 1000.0, 0.5f);
+
+    if (argc > 1 && std::string (argv[1]) == "m5")        // quick run of the milestone 5 tests only
+    {
+        testSoft (dc, dc3);
+        testRadio (dc);
+        root.deleteRecursively();
+        std::cout << "\n" << (failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED: " + std::to_string (failures) + " check(s)") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
 
     if (argc > 1 && std::string (argv[1]) == "m4")        // quick run of the milestone 4 tests only
     {
@@ -1214,6 +1452,8 @@ int main (int argc, char** argv)
     testStressM2 (ramps, dc);
     testRules();
     testBanks (root.getChildFile ("banks"));
+    testSoft (dc, dc3);
+    testRadio (dc);
     testLongFile (big);
 
     root.deleteRecursively();
