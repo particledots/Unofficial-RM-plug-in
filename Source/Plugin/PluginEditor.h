@@ -1,4 +1,4 @@
-// Radio Music (unofficial) - user interface (milestone 5).
+// Radio Music (unofficial) - user interface (milestone 7).
 // An unofficial, clean-room plugin inspired by Music Thing Modular's Radio Music mk2,
 // designed by Tom Whitwell with Chris Johnson of Plus Minus Audio.
 #pragma once
@@ -100,6 +100,25 @@ private:
     juce::ParameterAttachment attachment;
     int bank = 0;
 };
+
+//==============================================================================
+// Full-window About screen: credits, licence and what is a design choice. Click anywhere to close.
+class AboutOverlay : public juce::Component
+{
+public:
+    AboutOverlay();
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override { setVisible (false); }
+};
+
+// Invisible click area (over the "UNOFFICIAL" tag) that opens the About screen.
+class ClickArea : public juce::Component
+{
+public:
+    std::function<void()> onClick;
+    ClickArea() { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void mouseDown (const juce::MouseEvent&) override { if (onClick) onClick(); }
+};
 } // namespace rmui
 
 //==============================================================================
@@ -135,6 +154,8 @@ private:
     rmui::RmButton resetButton, pauseButton, hostSyncButton, radioStartButton, immediateButton, folderButton, rescanButton;
     rmui::RmButton quantiseButton, gritButton, ssbButton;
     rmui::Segmented loopSelector, speedModeSelector, tunerSelector, fadeSelector;
+    rmui::ClickArea aboutArea;
+    rmui::AboutOverlay aboutOverlay;
 
     juce::AudioProcessorValueTreeState::SliderAttachment startAttach, endAttach, crossfadeAttach, volumeAttach,
                                                          noiseAttach, whistleAttach, strengthAttach, advanceAttach;

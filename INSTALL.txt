@@ -54,11 +54,19 @@ STEP 5 - Use it in Logic Pro
   5. In the plug-in window click "CHOOSE FOLDER" and pick a folder containing
      .wav or .aif/.aiff files. Press Play in Logic, then drag along the tuning dial
      to change station. Hover over any control to see what it does.
+  6. Click the word UNOFFICIAL in the title bar to see the version, credits and licence.
 
 UPDATING FROM AN EARLIER VERSION
   1. Quit Logic Pro completely.
-  2. Repeat steps 2 and 3 above (copy over the old files, say Replace, then run the xattr lines).
-  3. Open Logic Pro again.
+  2. Delete every old "Radio Music Unofficial" file from these four folders (use Go > Go to Folder...):
+       /Library/Audio/Plug-Ins/Components     ~/Library/Audio/Plug-Ins/Components
+       /Library/Audio/Plug-Ins/VST3           ~/Library/Audio/Plug-Ins/VST3
+     (An old copy in a second folder is the usual reason Logic keeps loading an old version.)
+  3. Repeat steps 2 and 3 above (copy in the new files, then run the xattr lines).
+  4. Open Logic Pro, go to Logic Pro > Settings... > Plug-in Manager..., select Radio Music Unofficial
+     and click "Reset & Rescan Selection".
+  5. Add the plug-in to a NEW track (an instance in an already open project can keep showing the old window).
+  6. Click UNOFFICIAL in the title bar: the version number shown there should be the one you installed.
 
 UNINSTALL
   Delete the .component and .vst3 files from the folders in step 2.

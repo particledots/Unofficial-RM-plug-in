@@ -194,6 +194,19 @@ int main (int argc, char** argv)
     snap (proc, outDir.getChildFile ("7_soft.png"));
     setParam (proc, "tunerMode", 0.0f);
 
+    // About screen
+    {
+        rmui::AboutOverlay about;
+        about.setSize (RadioMusicEditor::kBaseWidth, RadioMusicEditor::kBaseHeight);
+        auto img = about.createComponentSnapshot (about.getLocalBounds(), true, 1.0f);
+        juce::PNGImageFormat fmt;
+        auto f = outDir.getChildFile ("8_about.png");
+        f.deleteFile();
+        juce::FileOutputStream out (f);
+        fmt.writeImageToStream (img, out);
+        std::cout << "wrote " << f.getFullPathName() << "\n";
+    }
+
     // scaled window (1.5x): panel must fill it
     {
         setParam (proc, "speedMode", 1.0f);

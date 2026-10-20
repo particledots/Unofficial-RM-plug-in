@@ -571,6 +571,72 @@ namespace
     }
 }
 
+namespace rmui
+{
+AboutOverlay::AboutOverlay()
+{
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+}
+
+void AboutOverlay::paint (juce::Graphics& g)
+{
+    using namespace colours;
+    g.fillAll (bg.withAlpha (0.97f));
+
+    const auto card = getLocalBounds().withSizeKeepingCentre (getWidth() - 120, 450);
+    auto area = card;
+    g.setColour (panel);
+    g.fillRoundedRectangle (area.toFloat(), 14.0f);
+    g.setColour (panelEdge);
+    g.drawRoundedRectangle (area.toFloat().reduced (0.5f), 14.0f, 1.5f);
+    area = area.reduced (32, 24);
+
+    g.setColour (cream);
+    g.setFont (uiFont (26.0f, true));
+    g.drawText ("RADIO MUSIC", area.removeFromTop (34), juce::Justification::centredLeft, false);
+    g.setColour (amber);
+    g.setFont (uiFont (12.0f, true));
+    g.drawText ("UNOFFICIAL   version " + juce::String (RM_VERSION), area.removeFromTop (20), juce::Justification::centredLeft, false);
+    area.removeFromTop (14);
+
+    auto para = [&] (const juce::String& heading, const juce::String& text, int height)
+    {
+        g.setColour (amber.withAlpha (0.9f));
+        g.setFont (uiFont (10.5f, true));
+        g.drawText (heading, area.removeFromTop (16), juce::Justification::centredLeft, false);
+        g.setColour (cream.withAlpha (0.92f));
+        g.setFont (uiFont (13.5f));
+        g.drawFittedText (text, area.removeFromTop (height), juce::Justification::topLeft, 6, 0.95f);
+        area.removeFromTop (8);
+    };
+
+    para ("INSPIRED BY",
+          "Radio Music mk2, the Eurorack module designed by Tom Whitwell of Music Thing Modular with Chris Johnson of "
+          "Plus Minus Audio. Please support the real thing: musicthing.co.uk/Radio-Music",
+          38);
+    para ("NOT OFFICIAL",
+          "This plug-in is not affiliated with, endorsed by or supported by Music Thing Modular or Plus Minus Audio. "
+          "It is an independent, unofficial project.",
+          38);
+    para ("HOW IT WAS MADE",
+          "A clean-room reimplementation from the published documentation only. No Radio Music firmware code and no "
+          "VCV Rack port code was copied or consulted. Where the documentation is silent (the Soft and Radio curves, "
+          "the '90s stretch, MIDI), the behaviour is this plug-in's own choice and may differ from the hardware.",
+          56);
+    para ("LICENCE",
+          "Copyright (C) 2026 particledots. Free software under the GNU Affero General Public License v3. "
+          "Source code: github.com/particledots/Unofficial-RM-plug-in",
+          38);
+    para ("BUILT WITH",
+          "JUCE 9.0.4 (used under the AGPLv3), which includes the Steinberg VST3 SDK (MIT) and Apple's AudioUnitSDK (Apache-2.0).",
+          38);
+
+    g.setColour (dim);
+    g.setFont (uiFont (11.0f));
+    g.drawText ("Click anywhere to close.", juce::Rectangle<int> (card.getX(), card.getBottom() + 8, card.getWidth(), 18), juce::Justification::centred, false);
+}
+} // namespace rmui
+
 RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     : processor (p),
       dial (p),
@@ -677,6 +743,11 @@ RadioMusicPanel::RadioMusicPanel (RadioMusicProcessor& p)
     addHint (folderButton,     "Choose the folder to play. Audio files (WAV, AIFF, RAW) in it are the stations. Folders named 0 to 15 (like \"05 shortwave\") are banks; subfolders pick one file at a time.");
     addHint (rescanButton,     "Read the folder again: picks up new files, subfolders and a new or changed settings.txt (which is applied to the knobs). Stays on the current bank.");
     addHint (bankStepper,      "Bank 0 to 15: root folders whose names start with a number. Click the left or right side, or use the mouse wheel. Without numbered folders, the whole folder is bank 0.");
+
+    addAndMakeVisible (aboutArea);
+    aboutArea.onClick = [this] { aboutOverlay.setBounds (getLocalBounds()); aboutOverlay.setVisible (true); aboutOverlay.toFront (false); };
+    addHint (aboutArea, "About this plug-in: credits, licence and what is this plug-in's own choice. Click to open, click again to close.");
+    addChildComponent (aboutOverlay);
 
     addMouseListener (this, true);
     startTimerHz (30);
@@ -821,6 +892,8 @@ void RadioMusicPanel::resized()
     strengthKnob.setBounds  (Rectangle<int> (516, 488, 88, 96));
     ssbButton.setBounds     (Rectangle<int> (620, 520, 120, 24));
 
+    aboutArea.setBounds (200, 20, 84, 24);
+    aboutOverlay.setBounds (getLocalBounds());
     folderButton.setBounds (Rectangle<int> (24, 638, 120, 26));
     rescanButton.setBounds (Rectangle<int> (150, 638, 70, 26));
 }

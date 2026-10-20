@@ -10,9 +10,16 @@ in the background when you tune away, so tuning back finds them further along.
 > This project is **not affiliated with, endorsed by or supported by** Music Thing Modular or Plus Minus Audio.
 > Please support the real thing: <https://www.musicthing.co.uk/Radio-Music/>
 
-## Status: milestone 6
+## Quick start
 
-Works now:
+1. Install it (see `INSTALL.txt`).
+2. In Logic Pro add a Software Instrument track and choose **AU Instruments > particledots > Radio Music Unofficial > Stereo**.
+3. Click **CHOOSE FOLDER** and pick a folder of audio files (or a folder of numbered bank folders, like the module's SD card).
+4. Press play in Logic and drag along the tuning dial. Hover over any control to see what it does.
+5. Click **UNOFFICIAL** in the title bar for credits and the licence.
+
+## What it does (version 0.7.0)
+
 - Choose a folder of WAV / AIFF / `.raw` files. Each file is a station (sorted by file name). `.raw` files are read as
   44.1 kHz, 16-bit, mono, little-endian (byte order is not documented; this is a guess).
 - **Banks 0 to 15**: root folders whose names start with a number (`0`, `05 shortwave`, `15 - Koto plucks`) are banks,
@@ -47,9 +54,16 @@ Works now:
   (8-bit, about 20 kHz, zero-order hold, with a post-DAC filter).
 - Files at any supported sample rate are played at the right speed in the session rate.
 - Long files are streamed from disk, never loaded into memory.
-- A tuning-dial user interface with hover help for every control.
+- A tuning-dial user interface with hover help for every control, and an About screen (click **UNOFFICIAL**).
 
-Not yet (planned): final polish, About text and release notes.
+## Known limitations
+
+- Only tested by its author in Logic Pro on Apple silicon. The Intel (x86_64) half of the universal build, other hosts and the VST3 are untested beyond automated validation (auval and pluginval).
+- The Soft and Radio curves, the '90s time stretch and the MIDI Reset are this plug-in's own design (the documentation is silent), so they will not match the hardware exactly.
+- `.raw` byte order is a guess (the documentation gives sample rate, bit depth and channels only).
+- MIDI is limited to note 36 = Reset, and it takes effect at the start of an audio block, not sample-accurately.
+- Very fast retuning while several crossfades overlap can briefly add up to more than full level; turn the volume down if you automate rapid station changes.
+- Out of scope: pulse out / clock divider, CV calibration, LEDs, SD-card reader mode and Radio Remote hardware.
 
 ## How it was made (clean room)
 

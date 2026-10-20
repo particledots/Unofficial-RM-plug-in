@@ -9,7 +9,10 @@ if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build universal binaries" FORCE)
 endif()
 
-project(RadioMusicUnofficial VERSION 0.1.0 LANGUAGES C CXX)
+project(RadioMusicUnofficial VERSION 0.7.0 LANGUAGES C CXX)
+
+# The version is shown in the About screen.
+add_compile_definitions(RM_VERSION="${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
