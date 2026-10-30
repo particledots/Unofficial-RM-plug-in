@@ -86,6 +86,11 @@ jobs:
           cp -R "$AU_PATH" dist/RadioMusicUnofficial/
           cp -R "$VST_PATH" dist/RadioMusicUnofficial/
           cp INSTALL.txt LICENSE dist/RadioMusicUnofficial/
+          # Easy installer for Logic (double-click; same file in every Unofficial plugin)
+          cp tools/install/Install-Unofficial-Plugin.command dist/RadioMusicUnofficial/
+          chmod +x dist/RadioMusicUnofficial/Install-Unofficial-Plugin.command
+          if [ -f dist/RadioMusicUnofficial/INSTALL.txt ]; then printf '\nEASY INSTALL (Logic, Audio Unit): double-click Install-Unofficial-Plugin.command in this folder. It asks for your Mac password once.\n' >> dist/RadioMusicUnofficial/INSTALL.txt; fi
+          [ -x dist/RadioMusicUnofficial/Install-Unofficial-Plugin.command ] || { echo "::error::PACKAGE missing Install-Unofficial-Plugin.command"; exit 1; }
           ditto -c -k --keepParent dist/RadioMusicUnofficial RadioMusicUnofficial-macOS.zip
           ls -l RadioMusicUnofficial-macOS.zip
 
